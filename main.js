@@ -192,9 +192,9 @@
 
                 // --- Update this specific block in the createStatusBar function ---
                 const langBlock = document.createElement('div');
-                langBlock.className = 'vim-right-segment segment-lang'; 
+                langBlock.className = 'vim-right-segment segment-lang';
                 // Added margin-right: 6px to the icon span for the requested padding
-                langBlock.innerHTML = '<span style="font-size: 13px; margin-right: 6px; display: inline-block;"></span> TypeScript';
+                langBlock.innerHTML = '<span style="font-size: 13px; margin-right: 6px; display: inline-block;"></span> TypeScript';
 
                 const posBlock = document.createElement('div');
                 posBlock.id = 'vim-cursor-pos';
@@ -258,6 +258,20 @@
                     const rawOutputElement = createStatusBar(editor);
                     activeVimInstance = window.MonacoVim.initVimMode(editor, rawOutputElement);
                     console.log("[Native Space] Vim successfully bound with True Powerline CSS.");
+
+                    // Inject custom Vim mapping: go -> gg (go to top of document)
+                    try {
+                        const Vim = (window.MonacoVim.VimMode && window.MonacoVim.VimMode.Vim) || window.MonacoVim.Vim;
+                        if (Vim && typeof Vim.noremap === 'function') {
+                            Vim.noremap('go', 'gg', 'normal');
+                            Vim.noremap('go', 'gg', 'visual');
+                            console.log("[Native Space] Vim custom mappings applied: go -> gg");
+                        } else {
+                            console.warn("[Native Space] Vim object or noremap function not found on MonacoVim.");
+                        }
+                    } catch (e) {
+                        console.error("[Native Space] Failed to register custom Vim mappings:", e);
+                    }
                 }
             }, 100);
             setTimeout(() => clearInterval(checkReady), 10000);
