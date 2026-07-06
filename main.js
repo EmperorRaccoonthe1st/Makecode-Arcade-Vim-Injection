@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         MakeCode Monaco Vim Bindings (V21.1 - True NerdFont Powerline)
+// @name         MakeCode Monaco Vim Bindings (V22)
 // @namespace    http://tampermonkey.net/
-// @version      21.1
-// @description  Anti-aliased CSS Border Chevrons, NerdFonts, and VS Code palette
+// @version      22
+// @description  Injects the vim extension into the monaco code editor in MakeCode Arcade. Now with a custom powerline status bar!
 // @match        https://arcade.makecode.com/*
 // @run-at       document-start
 // @resource     monacoVim https://cdn.jsdelivr.net/npm/monaco-vim@0.4.2/dist/monaco-vim.js
@@ -12,7 +12,7 @@
 (function() {
     'use strict';
     console.log("==================================================");
-    console.log("✨ [Vim Injector] V21.1 Aesthetic Overhaul Booting...");
+    console.log("[Vim Injector] V22 Starting..");
     console.log("==================================================");
 
     let vimScriptText;
@@ -246,9 +246,85 @@
             }
             return document.getElementById('vim-raw-output');
         }
+        function setupEmacsInsertKeys(editor) {
+            editor.onKeyDown((e) => {
+                const isInsertMode = activeVimInstance && activeVimInstance.ctxInsert && activeVimInstance.ctxInsert.get();
+                if (!isInsertMode) return;
+
+                const key = e.browserEvent.key.toLowerCase();
+                const ctrl = e.ctrlKey;
+                const meta = e.metaKey;
+
+                if (ctrl && !meta && !e.altKey && !e.shiftKey) {
+                    let handled = false;
+                    if (key === 'a') {
+                        editor.trigger('keyboard', 'cursorHome', null);
+                        handled = true;
+                    } else if (key === 'e') {
+                        editor.trigger('keyboard', 'cursorEnd', null);
+                        handled = true;
+                    } else if (key === 'b') {
+                        editor.trigger('keyboard', 'cursorLeft', null);
+                        handled = true;
+                    } else if (key === 'f') {
+                        editor.trigger('keyboard', 'cursorRight', null);
+                        handled = true;
+                    } else if (key === 'd') {
+                        editor.trigger('keyboard', 'deleteRight', null);
+                        handled = true;
+                    } else if (key === 'k') {
+                        // Kill line (delete to end of line)
+                        try {
+                            const position = editor.getPosition();
+                            const lineContent = editor.getModel().getLineContent(position.lineNumber);
+                            let range;
+                            if (position.column > lineContent.length) {
+                                if (position.lineNumber < editor.getModel().getLineCount()) {
+                                    range = new window.monaco.Range(
+                                        position.lineNumber,
+                                        position.column,
+                                        position.lineNumber + 1,
+                                        1
+                                    );
+                                }
+                            } else {
+                                range = new window.monaco.Range(
+                                    position.lineNumber,
+                                    position.column,
+                                    position.lineNumber,
+                                    lineContent.length + 1
+                                );
+                            }
+                            if (range) {
+                                editor.executeEdits('emacs-kill', [{
+                                    range: range,
+                                    text: '',
+                                    forceMoveMarkers: true
+                                }]);
+                            }
+                        } catch (err) {
+                            console.error("Error in Ctrl+K delete to end of line:", err);
+                        }
+                        handled = true;
+                    }
+
+                    if (handled) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    }
+                }
+            });
+        }
 
         function bindVimToEditor(editor) {
             if (activeVimInstance) activeVimInstance.dispose();
+
+            // Set up Emacs key interception in insert mode (runs before MonacoVim's handler)
+            if (!editor._emacsKeysBound) {
+                setupEmacsInsertKeys(editor);
+                editor._emacsKeysBound = true;
+            }
+
             const checkReady = setInterval(() => {
                 const domNode = editor.getDomNode();
                 if (domNode && document.body.contains(domNode) && editor.getModel()) {
@@ -259,10 +335,11 @@
                     activeVimInstance = window.MonacoVim.initVimMode(editor, rawOutputElement);
                     console.log("[Native Space] Vim successfully bound with True Powerline CSS.");
 
-                    // Inject custom Vim mapping: go -> gg (go to top of document)
+                    // Inject custom Vim mappings
                     try {
                         const Vim = (window.MonacoVim.VimMode && window.MonacoVim.VimMode.Vim) || window.MonacoVim.Vim;
                         if (Vim && typeof Vim.noremap === 'function') {
+                            // go -> gg (go to top of document)
                             Vim.noremap('go', 'gg', 'normal');
                             Vim.noremap('go', 'gg', 'visual');
                             console.log("[Native Space] Vim custom mappings applied: go -> gg");
