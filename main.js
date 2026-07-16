@@ -1,9 +1,10 @@
 // ==UserScript==
-// @name         MakeCode Monaco Vim Bindings (V22)
+// @name         MakeCode Monaco Vim Bindings
 // @namespace    http://tampermonkey.net/
-// @version      22
-// @description  Injects the vim extension into the monaco code editor in MakeCode Arcade. Now with a custom powerline status bar!
+// @version      25.0
+// @description  Tailwind CSS Slate theme, flat matte colors, and CSS border chevrons
 // @match        https://arcade.makecode.com/*
+// @match        https://*.userpxt.io/*
 // @run-at       document-start
 // @resource     monacoVim https://cdn.jsdelivr.net/npm/monaco-vim@0.4.2/dist/monaco-vim.js
 // @grant        GM_getResourceText
@@ -11,8 +12,19 @@
 
 (function() {
     'use strict';
+
+    // Check if we are executing inside the cross-origin simulator iframe
+    if (window.self !== window.top) {
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                window.parent.postMessage({ type: 'VIM_ESCAPE_SIMULATOR' }, '*');
+            }
+        }, true); // Capture phase to intercept before the game engine consumes the key
+        return; // Halt loader execution inside the iframe context
+    }
+
     console.log("==================================================");
-    console.log("[Vim Injector] V22 Starting..");
+    console.log("✨ [Vim Injector] Booting...");
     console.log("==================================================");
 
     let vimScriptText;
@@ -28,9 +40,110 @@
     dataNode.id = "vim-payload-transfer";
     dataNode.style.display = "none";
     dataNode.textContent = vimScriptText;
-    document.documentElement.appendChild(dataNode);
+    if (document.documentElement) {
+        document.documentElement.appendChild(dataNode);
+    } else {
+        const checkDoc = setInterval(() => {
+            if (document.documentElement) {
+                clearInterval(checkDoc);
+                document.documentElement.appendChild(dataNode);
+            }
+        }, 5);
+    }
 
     function nativePageExecution() {
+        const patchedControllers = new WeakSet();
+        const patchedRegisters = new WeakSet();
+
+        // Listen for VIM_ESCAPE_SIMULATOR messages from the simulator iframe to return focus to the editor
+        window.addEventListener('message', (event) => {
+            if (event.data && event.data.type === 'VIM_ESCAPE_SIMULATOR') {
+                console.log("[Native Space] Escape key detected in simulator. Focus returning to Monaco...");
+                if (window.editor) {
+                    window.editor.focus();
+                }
+            }
+        });
+
+        // Monkeypatch window.setTimeout to throttle macro/repeat replay loops and prevent editor state sync issues under load
+        try {
+            const originalSetTimeout = window.setTimeout;
+            window.setTimeout = function(callback, delay, ...args) {
+                if (window._vimIntegrationState && window._vimIntegrationState.isReplaying && (delay === 0 || delay === 1)) {
+                    window._vimIntegrationState.replayedCount++;
+                    if (window._vimIntegrationState.replayedCount >= window._vimIntegrationState.totalReplayCount) {
+                        window._vimIntegrationState.isReplaying = false;
+                    }
+                    console.log("[Vim Injector] Throttling replay step:", window._vimIntegrationState.replayedCount);
+                    return originalSetTimeout.call(this, callback, 50, ...args);
+                }
+                return originalSetTimeout.call(this, callback, delay, ...args);
+            };
+            console.log("[Native Space] Replay throttle setTimeout monkeypatch active.");
+        } catch (err) {
+            console.error("[Native Space] Failed to monkeypatch setTimeout:", err);
+        }
+
+        // Intercept maybeReset on Object.prototype to catch all instances of lastInsertModeChanges
+        try {
+            let _changesKey = Symbol('changesVal');
+            let _protoMaybeResetKey = Symbol('protoMaybeResetVal');
+
+            Object.defineProperty(Object.prototype, 'maybeReset', {
+                get: function() {
+                    return this[_protoMaybeResetKey] || false;
+                },
+                set: function(val) {
+                    if (window._vimIntegrationState && window._vimIntegrationState.justTyped && val === true) {
+                        console.log("[Vim Injector] maybeReset set blocked (typing active).");
+                        return; // Ignore reset during typing
+                    }
+                    console.log("[Vim Injector] maybeReset set allowed (typing inactive):", val);
+                    this[_protoMaybeResetKey] = val;
+                },
+                configurable: true
+            });
+
+            Object.defineProperty(Object.prototype, 'changes', {
+                get: function() {
+                    return this[_changesKey];
+                },
+                set: function(val) {
+                    this[_changesKey] = val;
+                    if (val && Array.isArray(val)) {
+                        let _maybeResetKey = Symbol('maybeResetVal');
+                        Object.defineProperty(this, 'maybeReset', {
+                            get: function() {
+                                return this[_maybeResetKey] || false;
+                            },
+                            set: function(mVal) {
+                                if (window._vimIntegrationState && window._vimIntegrationState.justTyped && mVal === true) {
+                                    console.log("[Vim Injector] maybeReset set blocked (typing active).");
+                                    return;
+                                }
+                                console.log("[Vim Injector] maybeReset set allowed (typing inactive):", mVal);
+                                this[_maybeResetKey] = mVal;
+                            },
+                            configurable: true
+                        });
+                    }
+                },
+                configurable: true
+            });
+            Object.defineProperty(Object.prototype, '_isPatched', {
+                get: function() {
+                    if (this.changes && Array.isArray(this.changes)) {
+                        return true;
+                    }
+                    return undefined;
+                },
+                configurable: true
+            });
+            console.log("[Native Space] Dot-repeat last change tracking prototype patch applied successfully.");
+        } catch (err) {
+            console.error("[Native Space] Failed to apply prototype patch:", err);
+        }
+
         const rawVimLibrary = document.getElementById('vim-payload-transfer').textContent;
         let isLibraryInjected = false;
         let activeVimInstance = null;
@@ -48,58 +161,168 @@
             } catch(e) { console.error("[Native Space] Injection Error:", e); }
         }
 
+        function updateFileNameSegment(editor) {
+            const model = editor.getModel();
+            const filenameEl = document.querySelector('.file-name');
+            if (filenameEl && model && model.uri) {
+                const uriPath = model.uri.path;
+                const filename = uriPath ? uriPath.split('/').pop() : 'main.ts';
+                filenameEl.textContent = filename || 'main.ts';
+            } else if (filenameEl) {
+                filenameEl.textContent = 'main.ts';
+            }
+        }
+
+        function updateDiagnosticsSummary(editor) {
+            if (!editor || !window.monaco) return;
+            const model = editor.getModel();
+            if (!model) return;
+            
+            const markers = window.monaco.editor.getModelMarkers({ resource: model.uri });
+            let errors = 0;
+            let warnings = 0;
+            
+            markers.forEach(m => {
+                if (m.severity === 8) { // monaco.MarkerSeverity.Error
+                    errors++;
+                } else if (m.severity === 4) { // monaco.MarkerSeverity.Warning
+                    warnings++;
+                }
+            });
+            
+            const errEl = document.getElementById('diag-errors');
+            const warnEl = document.getElementById('diag-warnings');
+            
+            if (errEl) {
+                if (errors > 0) {
+                    errEl.querySelector('.diag-count').textContent = errors;
+                    errEl.style.display = 'flex';
+                } else {
+                    errEl.style.display = 'none';
+                }
+            }
+            
+            if (warnEl) {
+                if (warnings > 0) {
+                    warnEl.querySelector('.diag-count').textContent = warnings;
+                    warnEl.style.display = 'flex';
+                } else {
+                    warnEl.style.display = 'none';
+                }
+            }
+        }        function updateLanguageSegment(editor) {
+            const model = editor.getModel();
+            const langEl = document.querySelector('.segment-lang');
+            if (!langEl) return;
+            if (model) {
+                const path = model.uri.path.toLowerCase();
+                if (path.endsWith('.py')) {
+                    langEl.textContent = 'Python';
+                    return;
+                }
+                if (path.endsWith('.js')) {
+                    langEl.textContent = 'Javascript';
+                    return;
+                }
+                if (path.endsWith('.cpp') || path.endsWith('.h') || path.endsWith('.hpp')) {
+                    langEl.textContent = 'cpp';
+                    return;
+                }
+            }
+            // Default: Typescript
+            langEl.textContent = 'Typescript';
+        }
+
         function createStatusBar(editor) {
             const editorDomNode = editor.getDomNode();
             const container = editorDomNode.parentElement;
-            let statusContainer = document.getElementById('neovim-status-container');
+            let wrapper = document.getElementById('neovim-bar-wrapper');
 
-            if (!statusContainer) {
+            if (!wrapper) {
                 const style = document.createElement('style');
                 style.textContent = `
-                    /* --- CSS VARIABLES & VS CODE / TOKYONIGHT THEME --- */
+                    @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;700&display=swap');
+
                     :root {
-                        --pl-bg: #1f1f1f; /* Native VS Code Background */
-                        --pl-border: #2b2b2b;
-                        --pl-text: #cdd6f4;
+                        --pl-bg: #121212; /* Darkened empty track background */
+                        --pl-bg-gradient: #121212; /* Flat terminal background */
+                        --pl-border: #3e3e3e; /* Clearer split divider border */
+                        --pl-text: #cccccc; /* Muted terminal text */
                         --pl-height: 24px;
 
-                        --pl-normal: #89b4fa;
-                        --pl-insert: #a6e3a1;
-                        --pl-visual: #cba6f7;
-                        --pl-command: #f9e2af;
+                        /* Flat matte terminal colors with a bit more pop and distinct vibrancy */
+                        --pl-normal: #61afef; /* Sky Blue (One Dark) */
+                        --pl-normal-border: #61afef;
+                        --pl-insert: #98c379; /* Muted Green (One Dark) */
+                        --pl-insert-border: #98c379;
+                        --pl-visual: #c678dd; /* Muted Violet (One Dark) */
+                        --pl-visual-border: #c678dd;
+                        --pl-command: #e5c07b; /* Muted Amber (One Dark) */
+                        --pl-command-border: #e5c07b;
+                        --pl-replace: #e06c75; /* Muted Red (One Dark) */
+                        --pl-replace-border: #e06c75;
 
-                        --pl-seg1: #282a36; /* Encoding - Darkest */
-                        --pl-seg2: #3b4252; /* Language - Mid */
-                        --pl-seg3: #89b4fa; /* Position - Highlight */
+                        --pl-seg1: #2d2d2d; /* Encoding: slightly lighter than background */
+                        --pl-seg1-border: #2d2d2d;
+                        --pl-seg2: #3f3f46; /* Language: Slate-700 / Zinc-700 equivalent */
+                        --pl-seg2-border: #3f3f46;
 
                         /* Arrow width controls the sharpness of the chevron */
                         --pl-arrow-w: 12px;
                     }
 
-                    /* Base Container */
-                    #neovim-status-container {
+                    #neovim-bar-wrapper, #neovim-bar-wrapper * {
+                        font-family: "Fira Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+                        font-variant-ligatures: contextual !important;
+                        font-feature-settings: "calt" 1 !important;
+                    }
+
+                    #neovim-bar-wrapper {
                         position: absolute; bottom: 0; left: 0; width: 100%; height: var(--pl-height);
-                        background: var(--pl-bg); border-top: 1px solid var(--pl-border);
+                        background: var(--pl-bg-gradient); border-top: 1px solid var(--pl-border);
                         display: flex; justify-content: space-between; align-items: stretch;
                         z-index: 9999;
-                        font-family: 'JetBrainsMono Nerd Font', 'FiraCode Nerd Font', 'Hack Nerd Font', 'Menlo', monospace;
                         font-size: 11px; font-weight: 700;
+                        box-sizing: content-box !important;
+                        line-height: 1 !important;
+                        box-shadow: 0 -1px 5px rgba(0, 0, 0, 0.15) !important; /* Tightened upward shadow */
+                    }
+
+                    #neovim-status-line {
+                        width: 100%;
+                        height: 100%;
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: stretch;
+                    }
+
+                    #neovim-status-line * {
+                        margin: 0;
+                        padding: 0;
+                        box-sizing: border-box;
                     }
 
                     .vim-left-zone { display: flex; align-items: stretch; flex-grow: 1; }
-                    .vim-right-zone { display: flex; align-items: stretch; background: var(--pl-bg); }
+                    .vim-right-zone { display: flex; align-items: stretch; background: var(--pl-bg-gradient); flex-shrink: 0; }
 
                     /* --- PURE CSS POWERLINE SEGMENTS (LEFT) --- */
-                    #vim-powerline-mode {
+                    #vim-mode-segment {
                         position: relative;
                         display: flex; align-items: center; justify-content: center;
-                        padding: 0 10px 0 15px; color: #11111b; text-transform: uppercase;
+                        padding: 0 10px 0 15px !important; color: #1f1f1f !important; text-transform: uppercase;
                         letter-spacing: 0.5px; z-index: 10;
-                        transition: background 0.1s;
+                        height: 100%;
+                        white-space: nowrap;
+                        flex-shrink: 0;
+                        line-height: 1 !important;
+                        margin: 0 !important;
+                        font-weight: 600 !important; /* Slightly less bold */
+                        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35) !important; /* Engraved effect */
+                        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15) !important; /* Micro-glint top highlight */
                     }
 
                     /* The Left-to-Right Chevron (CSS Border Hack) */
-                    #vim-powerline-mode::after {
+                    #neovim-status-line #vim-mode-segment::after {
                         content: ''; position: absolute; left: 100%; top: 0;
                         width: 0; height: 0;
                         border-style: solid;
@@ -111,35 +334,121 @@
                     }
 
                     /* Dynamic Mode Colors */
-                    #vim-powerline-mode.mode-normal { background: var(--pl-normal); }
-                    #vim-powerline-mode.mode-normal::after { border-left-color: var(--pl-normal); }
-                    #vim-powerline-mode.mode-insert { background: var(--pl-insert); }
-                    #vim-powerline-mode.mode-insert::after { border-left-color: var(--pl-insert); }
-                    #vim-powerline-mode.mode-visual { background: var(--pl-visual); }
-                    #vim-powerline-mode.mode-visual::after { border-left-color: var(--pl-visual); }
-                    #vim-powerline-mode.mode-command { background: var(--pl-command); }
-                    #vim-powerline-mode.mode-command::after { border-left-color: var(--pl-command); }
+                    #vim-mode-segment.mode-normal { background: var(--pl-normal); }
+                    #vim-mode-segment.mode-normal::after { border-left-color: var(--pl-normal-border); }
+                    #vim-mode-segment.mode-insert { background: var(--pl-insert); }
+                    #vim-mode-segment.mode-insert::after { border-left-color: var(--pl-insert-border); }
+                    #vim-mode-segment.mode-visual { background: var(--pl-visual); }
+                    #vim-mode-segment.mode-visual::after { border-left-color: var(--pl-visual-border); }
+                    #vim-mode-segment.mode-command { background: var(--pl-command); }
+                    #vim-mode-segment.mode-command::after { border-left-color: var(--pl-command-border); }
+                    #vim-mode-segment.mode-replace { background: var(--pl-replace); }
+                    #vim-mode-segment.mode-replace::after { border-left-color: var(--pl-replace-border); }
+
+                    /* --- CENTER AREA CONTAINER --- */
+                    #neovim-center-container {
+                        flex-grow: 1;
+                        display: flex;
+                        align-items: center;
+                        position: relative;
+                        padding-left: calc(var(--pl-arrow-w) + 12px) !important;
+                        padding-right: calc(var(--pl-arrow-w) + 6px) !important; /* clear right-to-left chevrons */
+                        height: 100%;
+                    }
 
                     /* --- RAW OUTPUT & COMMAND PALETTE --- */
                     #vim-raw-output {
-                        flex-grow: 1; display: flex; align-items: center;
-                        padding-left: calc(var(--pl-arrow-w) + 12px); /* Safely clear the chevron tip */
-                        color: var(--pl-text); z-index: 1;
+                        width: 100%; height: 100%; 
+                        display: flex !important; align-items: center !important; justify-content: flex-start !important;
+                        gap: 4px !important;
+                        color: #ffffff !important;
+                        font-family: "Fira Code", ui-monospace, monospace !important;
+                        font-size: 13px !important; /* Scaled up to match main editor canvas */
+                        font-weight: 500 !important; /* Refined to medium weight */
+                        line-height: 24px !important; /* Locked vertical alignment */
+                        z-index: 1;
+                    }
+
+                    #vim-raw-output span {
+                        color: #ffffff !important;
+                        font-family: "Fira Code", ui-monospace, monospace !important;
+                        font-size: 13px !important;
+                        font-weight: 500 !important;
+                        line-height: 24px !important;
+                    }
+
+                    /* Target the Key Buffer span specifically (keep it small & styled like right-hand badges) */
+                    #vim-raw-output span[style*="float: right"] {
+                        position: relative !important;
+                        z-index: 100 !important;
+                        line-height: 24px !important;
+                        font-family: "Fira Code", ui-monospace, monospace !important;
+                        font-size: 11px !important; /* Stay small to match status badges */
+                        font-weight: 700 !important; /* Keep bold */
+                        color: var(--pl-text) !important; /* Muted grey */
+                        margin-left: auto !important; /* Push to far right */
                     }
 
                     #vim-raw-output input, .monaco-vim-dialog input, .vim-command-line input {
-                        background: #181825 !important; color: #a6e3a1 !important;
-                        border: 1px solid #313244 !important; outline: none !important;
-                        padding: 0 8px !important; font-family: inherit !important;
-                        font-size: 11px !important; height: 18px !important; width: 60% !important;
-                        border-radius: 2px !important; margin-left: 6px !important;
+                        background: var(--pl-bg) !important; /* match the darkest grey precisely */
+                        color: #ffffff !important; /* pure white high contrast */
+                        border: none !important;
+                        outline: none !important;
+                        padding: 0 !important;
+                        margin: 0 !important;
+                        font-family: "Fira Code", ui-monospace, monospace !important;
+                        font-size: 13px !important; /* Scaled up to match editor canvas */
+                        font-weight: 500 !important; /* Refined to medium weight */
+                        height: 24px !important; /* Fixed height to prevent vertical expansion */
+                        width: 100% !important;
+                        box-shadow: none !important;
+                        line-height: 24px !important; /* Locked vertical centering */
+                    }
+
+                    /* --- MESSAGE AREA --- */
+                    #neovim-message-area {
+                        position: absolute;
+                        left: calc(var(--pl-arrow-w) + 16px);
+                        right: 10px;
+                        display: none;
+                        align-items: center;
+                        color: var(--pl-text);
+                        font-weight: normal;
+                        overflow: hidden;
+                        white-space: nowrap;
+                        text-overflow: ellipsis;
+                        z-index: 2;
+                        cursor: pointer;
+                    }
+
+                    #neovim-message-tooltip {
+                        display: none;
+                        position: absolute;
+                        bottom: 28px;
+                        left: 20px;
+                        max-width: 450px;
+                        background: #1e1e2e;
+                        color: #cdd6f4;
+                        border: 1px solid #45475a;
+                        border-radius: 4px;
+                        padding: 8px 12px;
+                        z-index: 10000;
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+                        white-space: pre-wrap;
+                        font-family: inherit;
+                        font-size: 11px;
                     }
 
                     /* --- PURE CSS POWERLINE SEGMENTS (RIGHT) --- */
                     .vim-right-segment {
                         position: relative; display: flex; align-items: center; justify-content: center;
-                        padding: 0 15px 0 calc(var(--pl-arrow-w) + 8px); /* Pad left to clear incoming chevron */
-                        color: var(--pl-text);
+                        padding: 0 20px 0 12px !important; /* 12px left, 20px right to clear 12px incoming left chevron tip */
+                        white-space: nowrap;
+                        height: 100%;
+                        flex-shrink: 0;
+                        line-height: 1 !important;
+                        margin: 0 !important;
+                        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05) !important; /* Micro-glint top highlight */
                     }
 
                     /* The Right-to-Left Chevron */
@@ -154,82 +463,112 @@
                     }
 
                     /* Right Segments Z-Index & Color Stacking */
-                    .segment-encoding { background: var(--pl-seg1); z-index: 3; font-weight: normal; }
-                    .segment-encoding::before { border-right-color: var(--pl-seg1) !important; }
+                    .segment-encoding { background: var(--pl-seg1); z-index: 3; font-weight: normal; color: #d8dee9 !important; }
+                    .segment-encoding::before { border-right-color: var(--pl-seg1-border) !important; }
 
-                    .segment-lang { background: var(--pl-seg2); z-index: 4; font-weight: normal; }
-                    .segment-lang::before { border-right-color: var(--pl-seg2) !important; }
+                    .segment-lang { background: var(--pl-seg2); z-index: 4; font-weight: normal; color: #d8dee9 !important; }
+                    .segment-lang::before { border-right-color: var(--pl-seg2-border) !important; }
 
-                    .segment-pos { background: var(--pl-seg3); color: #11111b; font-weight: bold; z-index: 5; }
-                    .segment-pos::before { border-right-color: var(--pl-seg3) !important; }
+                    .segment-pos { color: #1f1f1f !important; font-weight: 600 !important; z-index: 5; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35) !important; }
+                    .segment-pos.mode-normal { background: var(--pl-normal); }
+                    .segment-pos.mode-normal::before { border-right-color: var(--pl-normal-border) !important; }
+                    .segment-pos.mode-insert { background: var(--pl-insert); }
+                    .segment-pos.mode-insert::before { border-right-color: var(--pl-insert-border) !important; }
+                    .segment-pos.mode-visual { background: var(--pl-visual); }
+                    .segment-pos.mode-visual::before { border-right-color: var(--pl-visual-border) !important; }
+                    .segment-pos.mode-command { background: var(--pl-command); }
+                    .segment-pos.mode-command::before { border-right-color: var(--pl-command-border) !important; }
+                    .segment-pos.mode-replace { background: var(--pl-replace); }
+                    .segment-pos.mode-replace::before { border-right-color: var(--pl-replace-border) !important; }
                 `;
                 document.head.appendChild(style);
 
-                statusContainer = document.createElement('div');
-                statusContainer.id = 'neovim-status-container';
+                wrapper = document.createElement('div');
+                wrapper.id = 'neovim-bar-wrapper';
 
-                // --- DOM STRUCTURE ---
-                const leftZone = document.createElement('div');
-                leftZone.className = 'vim-left-zone';
+                wrapper.innerHTML = `
+                    <div id="neovim-status-line">
+                        <div class="vim-left-zone">
+                            <div id="vim-mode-segment" class="status-segment mode-segment mode-normal">NORMAL</div>
+                            <div id="neovim-center-container">
+                                <div id="vim-raw-output"></div>
+                                <div id="neovim-message-area">
+                                    <span class="message-text"></span>
+                                    <div id="neovim-message-tooltip"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="vim-right-zone mode-normal">
+                            <div class="vim-right-segment segment-encoding">utf-8</div>
+                            <div class="vim-right-segment segment-lang"></div>
+                            <div id="vim-pos-segment" class="vim-right-segment segment-pos mode-normal">1:1</div>
+                        </div>
+                    </div>
+                    <div id="neovim-command-line" style="display: none; height: 0; width: 0; overflow: hidden;"></div>
+                `;
 
-                const modeBlock = document.createElement('div');
-                modeBlock.id = 'vim-powerline-mode';
-                modeBlock.className = 'mode-normal';
-                modeBlock.textContent = 'NORMAL';
+                container.appendChild(wrapper);
+                editorDomNode.style.paddingBottom = '25px';
 
-                const rawOutput = document.createElement('div');
-                rawOutput.id = 'vim-raw-output';
+                // --- OBSERVER FOR RAW OUTPUT ---
+                const rawOutput = wrapper.querySelector('#vim-raw-output');
+                const modeSegment = wrapper.querySelector('#vim-mode-segment');
+                const posSegment = wrapper.querySelector('#vim-pos-segment');
+                const msgArea = wrapper.querySelector('#neovim-message-area');
+                const msgTooltip = wrapper.querySelector('#neovim-message-tooltip');
 
-                leftZone.appendChild(modeBlock);
-                leftZone.appendChild(rawOutput);
+                // Set up hover event for message area tooltip
+                if (msgArea && msgTooltip) {
+                    msgArea.addEventListener('mouseenter', () => {
+                        const textSpan = msgArea.querySelector('.message-text');
+                        if (textSpan && textSpan.textContent.trim().length > 0) {
+                            msgTooltip.textContent = textSpan.textContent;
+                            msgTooltip.style.display = 'block';
+                        }
+                    });
+                    msgArea.addEventListener('mouseleave', () => {
+                        msgTooltip.style.display = 'none';
+                    });
+                }
 
-                const rightZone = document.createElement('div');
-                rightZone.className = 'vim-right-zone';
-
-                const encBlock = document.createElement('div');
-                encBlock.className = 'vim-right-segment segment-encoding';
-                encBlock.textContent = 'utf-8';
-
-                // --- Update this specific block in the createStatusBar function ---
-                const langBlock = document.createElement('div');
-                langBlock.className = 'vim-right-segment segment-lang';
-                // Added margin-right: 6px to the icon span for the requested padding
-                langBlock.innerHTML = '<span style="font-size: 13px; margin-right: 6px; display: inline-block;"></span> TypeScript';
-
-                const posBlock = document.createElement('div');
-                posBlock.id = 'vim-cursor-pos';
-                posBlock.className = 'vim-right-segment segment-pos';
-                posBlock.textContent = '1:1';
-
-                rightZone.appendChild(encBlock);
-                rightZone.appendChild(langBlock);
-                rightZone.appendChild(posBlock);
-
-                statusContainer.appendChild(leftZone);
-                statusContainer.appendChild(rightZone);
-                container.appendChild(statusContainer);
-                editorDomNode.style.paddingBottom = '24px';
-
-                // --- LOGIC ---
                 const observer = new MutationObserver(() => {
                     const textContent = rawOutput.textContent.toUpperCase();
+                    let modeText = 'NORMAL';
+                    let modeClass = 'mode-normal';
 
                     if (textContent.includes('INSERT')) {
-                        modeBlock.textContent = 'INSERT'; modeBlock.className = 'mode-insert';
+                        modeText = 'INSERT'; modeClass = 'mode-insert';
                     } else if (textContent.includes('VISUAL LINE') || textContent.includes('V-LINE')) {
-                        modeBlock.textContent = 'V-LINE'; modeBlock.className = 'mode-visual';
+                        modeText = 'V-LINE'; modeClass = 'mode-visual';
                     } else if (textContent.includes('VISUAL BLOCK') || textContent.includes('V-BLOCK')) {
-                        modeBlock.textContent = 'V-BLOCK'; modeBlock.className = 'mode-visual';
+                        modeText = 'V-BLOCK'; modeClass = 'mode-visual';
                     } else if (textContent.includes('VISUAL')) {
-                        modeBlock.textContent = 'VISUAL'; modeBlock.className = 'mode-visual';
+                        modeText = 'VISUAL'; modeClass = 'mode-visual';
                     } else if (textContent.includes('REPLACE')) {
-                        modeBlock.textContent = 'REPLACE'; modeBlock.className = 'mode-command';
+                        modeText = 'REPLACE'; modeClass = 'mode-command';
                     } else if (rawOutput.querySelector('input') || textContent.startsWith(':') || textContent.startsWith('/')) {
-                        modeBlock.textContent = 'COMMAND'; modeBlock.className = 'mode-command';
-                    } else {
-                        modeBlock.textContent = 'NORMAL'; modeBlock.className = 'mode-normal';
+                        modeText = 'COMMAND'; modeClass = 'mode-command';
                     }
 
+                    if (modeSegment) {
+                        modeSegment.textContent = modeText;
+                        modeSegment.className = `status-segment mode-segment ${modeClass}`;
+                    }
+                    if (posSegment) {
+                        posSegment.className = `vim-right-segment segment-pos ${modeClass}`;
+                    }
+                    const rightZone = wrapper.querySelector('.vim-right-zone');
+                    if (rightZone) {
+                        rightZone.className = `vim-right-zone ${modeClass}`;
+                    }
+
+                    // Hide custom message area if user is currently typing a command (input is visible)
+                    const hasInput = rawOutput.querySelector('input');
+                    if (msgArea && hasInput) {
+                        msgArea.style.display = 'none';
+                    }
+
+                    // Suppress "-- NORMAL --" or other mode display spans inside raw output
                     Array.from(rawOutput.querySelectorAll('span')).forEach(span => {
                         const txt = span.textContent.toUpperCase();
                         if (txt.includes('--') && (txt.includes('NORMAL') || txt.includes('INSERT') || txt.includes('VISUAL') || txt.includes('REPLACE'))) {
@@ -240,22 +579,111 @@
 
                 observer.observe(rawOutput, { childList: true, subtree: true, characterData: true });
 
-                editor.onDidChangeCursorPosition((e) => {
-                    posBlock.textContent = `${e.position.lineNumber}:${e.position.column}`;
-                });
+                // Set initial language
+                updateLanguageSegment(editor);
+
+                // Listen to editor changes safely
+                if (typeof editor.onDidChangeCursorPosition === 'function') {
+                    editor.onDidChangeCursorPosition((e) => {
+                        const posBlock = document.getElementById('vim-pos-segment');
+                        if (posBlock) {
+                            posBlock.textContent = `${e.position.lineNumber}:${e.position.column}`;
+                        }
+                    });
+                }
+
+                if (typeof editor.onDidChangeModel === 'function') {
+                    editor.onDidChangeModel(() => {
+                        updateLanguageSegment(editor);
+                        if (activeVimInstance) {
+                            activeVimInstance.dispose();
+                        }
+                        const rawOutputElement = document.getElementById('vim-raw-output');
+                        if (rawOutputElement && window.MonacoVim) {
+                            activeVimInstance = window.MonacoVim.initVimMode(editor, rawOutputElement);
+                        }
+                    });
+                }
             }
+
             return document.getElementById('vim-raw-output');
         }
         function setupEmacsInsertKeys(editor) {
+            let suggestWidgetVisible = false;
+            try {
+                const controller = editor.getContribution('editor.contrib.suggestController');
+                if (controller) {
+                    const widget = controller.widget && controller.widget.value ? controller.widget.value : controller.widget;
+                    if (widget && typeof widget.onDidShow === 'function') {
+                        widget.onDidShow(() => {
+                            suggestWidgetVisible = true;
+                        });
+                        widget.onDidHide(() => {
+                            suggestWidgetVisible = false;
+                        });
+                    }
+                }
+            } catch (err) {
+                console.error("[Native Space] Failed to register suggest widget visibility listener:", err);
+            }
+
             editor.onKeyDown((e) => {
+                // Intercept dot repeat in normal mode to restore changes array
+                if (e.browserEvent.key === '.') {
+                    try {
+                        const Vim = (window.MonacoVim.VimMode && window.MonacoVim.VimMode.Vim) || window.MonacoVim.Vim;
+                        if (Vim && typeof Vim.getVimGlobalState_ === 'function') {
+                            const globalState = Vim.getVimGlobalState_();
+                            if (globalState && globalState.macroModeState && globalState.macroModeState.lastInsertModeChanges && window._vimIntegrationState && window._vimIntegrationState.savedChanges) {
+                                globalState.macroModeState.lastInsertModeChanges.changes = [...window._vimIntegrationState.savedChanges];
+                                globalState.macroModeState.lastInsertModeChanges.maybeReset = false;
+                                window._vimIntegrationState.isReplaying = true;
+                                window._vimIntegrationState.replayedCount = 0;
+                                window._vimIntegrationState.totalReplayCount = window._vimIntegrationState.savedChanges.length;
+                                console.log("[Vim Injector] Restored saved changes for dot-repeat:", JSON.stringify(window._vimIntegrationState.savedChanges));
+                            }
+                        }
+                    } catch (err) {}
+                }
+
                 const isInsertMode = activeVimInstance && activeVimInstance.ctxInsert && activeVimInstance.ctxInsert.get();
                 if (!isInsertMode) return;
 
                 const key = e.browserEvent.key.toLowerCase();
                 const ctrl = e.ctrlKey;
                 const meta = e.metaKey;
+                const shift = e.shiftKey;
+                const alt = e.altKey;
 
-                if (ctrl && !meta && !e.altKey && !e.shiftKey) {
+                // 1. Suggest Widget Active Key Intercepts
+                if (suggestWidgetVisible) {
+                    if (ctrl && !meta && !alt && !shift) {
+                        if (key === 'j') {
+                            editor.trigger('keyboard', 'selectNextSuggestion', null);
+                            e.preventDefault();
+                            e.stopPropagation();
+                            return;
+                        } else if (key === 'k') {
+                            editor.trigger('keyboard', 'selectPrevSuggestion', null);
+                            e.preventDefault();
+                            e.stopPropagation();
+                            return;
+                        } else if (key === 'e') {
+                            editor.trigger('keyboard', 'hideSuggestWidget', null);
+                            e.preventDefault();
+                            e.stopPropagation();
+                            return;
+                        }
+                    } else if (key === 'enter' && !ctrl && !meta && !alt && !shift) {
+                        editor.trigger('keyboard', 'acceptSelectedSuggestion', null);
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return;
+                    }
+                }
+
+                // 2. Standard Emacs Key Bindings (and Fallbacks when suggest widget is closed)
+                if (ctrl && !meta && !alt && !shift) {
                     let handled = false;
                     if (key === 'a') {
                         editor.trigger('keyboard', 'cursorHome', null);
@@ -271,6 +699,10 @@
                         handled = true;
                     } else if (key === 'd') {
                         editor.trigger('keyboard', 'deleteRight', null);
+                        handled = true;
+                    } else if (key === 'j') {
+                        // Emacs Ctrl-J fallback: newline-and-indent
+                        editor.trigger('keyboard', 'type', { text: '\n' });
                         handled = true;
                     } else if (key === 'k') {
                         // Kill line (delete to end of line)
@@ -316,6 +748,651 @@
             });
         }
 
+        // Initialize default Vim settings globally
+        if (!window._vimSettings) {
+            window._vimSettings = {
+                nu: true,  // number (default enabled in Monaco)
+                rnu: false // relativenumber (default disabled)
+            };
+        }
+
+        function updateEditorLineNumbers(editor) {
+            if (!editor || !window._vimSettings) return;
+            const isNu = window._vimSettings.nu;
+            const isRnu = window._vimSettings.rnu;
+            
+            if (!isNu && !isRnu) {
+                editor.updateOptions({ lineNumbers: 'off' });
+            } else {
+                editor.updateOptions({
+                    lineNumbers: (num) => {
+                        const position = editor.getPosition();
+                        const curLine = position ? position.lineNumber : 1;
+                        if (isRnu) {
+                            const diff = Math.abs(num - curLine);
+                            if (diff === 0) {
+                                return isNu ? String(num) : "0";
+                            }
+                            return String(diff);
+                        }
+                        return String(num);
+                    }
+                });
+            }
+        }
+
+        // Initialize vim splits state globally
+        if (!window._vimSplits) {
+            window._vimSplits = {
+                panes: [],
+                activePaneIndex: 0
+            };
+        }
+
+        function initMainPane(editor) {
+            if (!window._vimSplits) return;
+            const exists = window._vimSplits.panes.some(p => p.editor === editor);
+            if (!exists) {
+                // Remove any previous main panes to avoid duplicates
+                window._vimSplits.panes = window._vimSplits.panes.filter(p => p.id !== 'main-pane');
+                window._vimSplits.panes.unshift({
+                    editor: editor,
+                    container: editor.getDomNode().parentElement,
+                    id: 'main-pane'
+                });
+                window._vimSplits.activePaneIndex = 0;
+                
+                // Track focus
+                editor.onDidFocusEditorText(() => {
+                    window.editor = editor;
+                    window._vimSplits.activePaneIndex = 0;
+                    if (window._vimIntegrationState) {
+                        window._vimIntegrationState.activeEditor = editor;
+                    }
+                });
+            }
+        }
+
+        function createSplitPane(direction) {
+            if (window._vimSplits.panes.length >= 2) {
+                showStatusBarMessage("Maximum split count (2) reached");
+                return;
+            }
+            
+            const mainPane = window._vimSplits.panes[0];
+            const mainEditor = mainPane.editor;
+            const parent = mainEditor.getDomNode().parentNode;
+            if (!parent) return;
+            
+            // Setup flex layout on the parent container
+            parent.style.display = 'flex';
+            parent.style.flexDirection = direction === 'vertical' ? 'row' : 'column';
+            parent.style.alignItems = 'stretch';
+            parent.style.justifyContent = 'stretch';
+            
+            // Style main editor DOM node
+            const mainDomNode = mainEditor.getDomNode();
+            mainDomNode.style.flex = '1 1 50%';
+            mainDomNode.style.position = 'relative';
+            mainDomNode.style.width = '100%';
+            mainDomNode.style.height = '100%';
+            
+            // Create split pane container div
+            const splitContainer = document.createElement('div');
+            splitContainer.id = 'vim-split-pane-1';
+            splitContainer.style.flex = '1 1 50%';
+            splitContainer.style.position = 'relative';
+            splitContainer.style.width = '100%';
+            splitContainer.style.height = '100%';
+            splitContainer.style.borderLeft = direction === 'vertical' ? '1px solid #3b4252' : 'none';
+            splitContainer.style.borderTop = direction === 'horizontal' ? '1px solid #3b4252' : 'none';
+            parent.appendChild(splitContainer);
+            
+            // Create the secondary editor
+            const splitEditor = window.monaco.editor.create(splitContainer, {
+                value: mainEditor.getValue(),
+                language: mainEditor.getModel().getLanguageId ? mainEditor.getModel().getLanguageId() : (mainEditor.getModel().getModeId ? mainEditor.getModel().getModeId() : 'typescript'),
+                theme: 'vs-dark',
+                automaticLayout: false
+            });
+            
+            // Sync model
+            splitEditor.setModel(mainEditor.getModel());
+            
+            // Sync scroll position
+            splitEditor.setScrollTop(mainEditor.getScrollTop());
+            splitEditor.setScrollLeft(mainEditor.getScrollLeft());
+            
+            // Initialize Vim mode for split editor
+            let statusBarNode = document.getElementById('neovim-bar-wrapper') || document.getElementById('vim-raw-output');
+            const splitVim = window.MonacoVim.initVimMode(splitEditor, statusBarNode);
+            
+            // Copy line number settings to split editor
+            updateEditorLineNumbers(splitEditor);
+            
+            // Register pane
+            window._vimSplits.panes.push({
+                editor: splitEditor,
+                vim: splitVim,
+                container: splitContainer,
+                id: 'split-pane-1'
+            });
+            
+            // Setup focus listener for split
+            splitEditor.onDidFocusEditorText(() => {
+                window.editor = splitEditor;
+                window._vimSplits.activePaneIndex = 1;
+                if (window._vimIntegrationState) {
+                    window._vimIntegrationState.activeEditor = splitEditor;
+                }
+            });
+            
+            // Trigger layout
+            setTimeout(() => {
+                mainEditor.layout();
+                splitEditor.layout();
+                splitEditor.focus();
+            }, 50);
+        }
+
+        function closeSplitPane(indexToClose) {
+            if (window._vimSplits.panes.length < 2) {
+                showStatusBarMessage("Only one window open. Use browser tab to exit.");
+                return;
+            }
+            
+            const pane = window._vimSplits.panes[indexToClose];
+            if (pane.id === 'main-pane') {
+                // If closing main pane, promote split pane 1 to main pane model/state
+                const splitPane = window._vimSplits.panes[1];
+                const mainPane = window._vimSplits.panes[0];
+                mainPane.editor.setModel(splitPane.editor.getModel());
+                mainPane.editor.setPosition(splitPane.editor.getPosition());
+                closeSplitPane(1);
+                mainPane.editor.focus();
+                return;
+            }
+            
+            // Dispose split editor and its Vim instance
+            if (pane.vim && typeof pane.vim.dispose === 'function') {
+                pane.vim.dispose();
+            }
+            if (pane.editor && typeof pane.editor.dispose === 'function') {
+                pane.editor.dispose();
+            }
+            
+            // Remove container DOM node
+            if (pane.container && pane.container.parentNode) {
+                pane.container.parentNode.removeChild(pane.container);
+            }
+            
+            // Remove from panes array
+            window._vimSplits.panes.splice(indexToClose, 1);
+            
+            // Reset main editor container to full flex size
+            const mainPane = window._vimSplits.panes[0];
+            const mainDomNode = mainPane.editor.getDomNode();
+            mainDomNode.style.flex = '1 1 100%';
+            mainDomNode.style.width = '100%';
+            mainDomNode.style.height = '100%';
+            
+            window.editor = mainPane.editor;
+            window._vimSplits.activePaneIndex = 0;
+            if (window._vimIntegrationState) {
+                window._vimIntegrationState.activeEditor = mainPane.editor;
+            }
+            
+            setTimeout(() => {
+                mainPane.editor.layout();
+                mainPane.editor.focus();
+            }, 50);
+        }
+
+        function onlyKeepCurrentPane() {
+            if (window._vimSplits.panes.length < 2) return;
+            const activeIndex = window._vimSplits.activePaneIndex;
+            if (activeIndex === 1) {
+                closeSplitPane(0);
+            } else {
+                closeSplitPane(1);
+            }
+        }
+
+        function setupClipboardSync(editor) {
+            try {
+                const Vim = (window.MonacoVim.VimMode && window.MonacoVim.VimMode.Vim) || window.MonacoVim.Vim;
+                if (!Vim || typeof Vim.getRegisterController !== 'function') return;
+
+                const controller = Vim.getRegisterController();
+                if (!controller) return;
+                let isWritingFromClipboard = false;
+
+                // 1. Monkeypatch register.setText (mainly for direct API calls/tests)
+                if (!patchedControllers.has(controller)) {
+                    const origGetRegister = controller.getRegister;
+                    controller.getRegister = function(name) {
+                        const reg = origGetRegister.apply(this, arguments);
+                        if (reg && !patchedRegisters.has(reg)) {
+                            const origSetText = reg.setText;
+                            reg.setText = function(text, isDelete) {
+                                const res = origSetText.apply(this, arguments);
+                                if (!isWritingFromClipboard && (!name || name === '"' || name === '+' || name === '*')) {
+                                    const cb = window.__mockClipboard || navigator.clipboard;
+                                    if (cb && typeof cb.writeText === 'function') {
+                                        cb.writeText(text).catch(err => {
+                                            console.warn("[Vim Injector] Clipboard write failed:", err);
+                                        });
+                                    }
+                                }
+                                return res;
+                            };
+                            patchedRegisters.add(reg);
+                        }
+                        return reg;
+                    };
+
+                    // 2. Monkeypatch pushText to intercept all Vim editor actions (y, d, c, x, etc.)
+                    const origPushText = controller.pushText;
+                    if (typeof origPushText === 'function') {
+                        controller.pushText = function(registerName, operator, text, linewise) {
+                            const res = origPushText.apply(this, arguments);
+                            if (!isWritingFromClipboard) {
+                                if (!registerName || registerName === '"' || registerName === '+' || registerName === '*') {
+                                    const cb = window.__mockClipboard || navigator.clipboard;
+                                    if (cb && typeof cb.writeText === 'function') {
+                                        cb.writeText(text).catch(err => {
+                                            console.warn("[Vim Injector] Clipboard write failed:", err);
+                                        });
+                                    }
+                                }
+                            }
+                            return res;
+                        };
+                    }
+
+                    patchedControllers.add(controller);
+                }
+
+                // 3. Function to sync System Clipboard -> Vim Registers (Mock/Test only on focus)
+                const syncClipboardToVim = async () => {
+                    try {
+                        // Only read from system clipboard on focus if running in E2E tests using __mockClipboard.
+                        // Real browsers enforce security restrictions that display floating "Paste" confirmation bubbles on focus readText.
+                        if (window.__mockClipboard && typeof window.__mockClipboard.readText === 'function') {
+                            const text = await window.__mockClipboard.readText();
+                            if (text) {
+                                isWritingFromClipboard = true;
+                                if (typeof controller.pushText === 'function') {
+                                    controller.pushText('"', 'yank', text, false);
+                                    controller.pushText('+', 'yank', text, false);
+                                    controller.pushText('*', 'yank', text, false);
+                                } else {
+                                    // Fallback if pushText isn't available
+                                    const defaultReg = controller.getRegister('"');
+                                    const plusReg = controller.getRegister('+');
+                                    const starReg = controller.getRegister('*');
+                                    if (defaultReg) defaultReg.setText(text);
+                                    if (plusReg) plusReg.setText(text);
+                                    if (starReg) starReg.setText(text);
+                                }
+                                isWritingFromClipboard = false;
+                            }
+                        }
+                    } catch (err) {
+                        console.log("[Vim Injector] Clipboard sync-in skipped or denied:", err.message);
+                    }
+                };
+
+                // 4. Synchronous Paste Listener for browser gestures (Ctrl+V / Cmd+V)
+                const pasteListener = (e) => {
+                    if (e.clipboardData) {
+                        const text = e.clipboardData.getData('text');
+                        if (text) {
+                            isWritingFromClipboard = true;
+                            if (typeof controller.pushText === 'function') {
+                                controller.pushText('"', 'yank', text, false);
+                                controller.pushText('+', 'yank', text, false);
+                                controller.pushText('*', 'yank', text, false);
+                            }
+                            isWritingFromClipboard = false;
+                        }
+                    }
+                };
+
+                // Bind focus listeners for E2E mock sync
+                const focusDisposable = editor.onDidFocusEditorWidget(() => {
+                    syncClipboardToVim();
+                });
+                
+                const focusListener = () => syncClipboardToVim();
+                const copyListener = () => syncClipboardToVim();
+                const cutListener = () => syncClipboardToVim();
+
+                document.addEventListener('copy', copyListener);
+                document.addEventListener('cut', cutListener);
+                document.addEventListener('paste', pasteListener);
+                window.addEventListener('focus', focusListener);
+
+                // Store references to clean up when editor or Vim mode is disposed
+                if (activeVimInstance) {
+                    const origDispose = activeVimInstance.dispose;
+                    activeVimInstance.dispose = function() {
+                        focusDisposable.dispose();
+                        document.removeEventListener('copy', copyListener);
+                        document.removeEventListener('cut', cutListener);
+                        document.removeEventListener('paste', pasteListener);
+                        window.removeEventListener('focus', focusListener);
+                        if (typeof origDispose === 'function') {
+                            origDispose.apply(this, arguments);
+                        }
+                    };
+                }
+                
+                // Initial sync
+                syncClipboardToVim();
+            } catch (e) {
+                console.error("[Vim Injector] Failed to initialize Clipboard Sync:", e);
+            }
+        }
+
+        function showStatusBarMessage(msg) {
+            const msgArea = document.getElementById('neovim-message-area');
+            const msgTooltip = document.getElementById('neovim-message-tooltip');
+            if (msgArea && msgArea.style && msgTooltip && msgTooltip.style) {
+                const lowerMsg = msg.toLowerCase();
+                const isError = lowerMsg.includes('error') || lowerMsg.includes('fail') || lowerMsg.includes('incorrect');
+                const isWarning = lowerMsg.includes('warning') || lowerMsg.includes('warn');
+                
+                if (isError) {
+                    msgArea.style.color = '#ef4444'; // Tailwind Red 500
+                    msgTooltip.style.borderColor = '#ef4444';
+                } else if (isWarning) {
+                    msgArea.style.color = '#f59e0b'; // Tailwind Amber 500
+                    msgTooltip.style.borderColor = '#f59e0b';
+                } else {
+                    msgArea.style.color = '#e2e8f0'; // Tailwind Slate 200
+                    msgTooltip.style.borderColor = '#334155'; // Tailwind Slate 700
+                }
+                
+                msgArea.style.display = 'flex';
+                
+                const textSpan = msgArea.querySelector('.message-text');
+                if (textSpan) textSpan.textContent = msg;
+                msgTooltip.textContent = msg;
+
+                const isMultiline = msg.includes('\n');
+                if (isMultiline) {
+                    msgTooltip.style.display = 'block';
+                }
+                
+                // Automatically hide the message area after 8 seconds
+                if (window._vimMsgTimeout) clearTimeout(window._vimMsgTimeout);
+                window._vimMsgTimeout = setTimeout(() => {
+                    msgArea.style.display = 'none';
+                    if (isMultiline) {
+                        msgTooltip.style.display = 'none';
+                    }
+                }, 8000);
+            } else {
+                console.log("[Vim Message]", msg);
+            }
+        }
+
+        function jumpToDiagnostic(editor, direction) {
+            if (!editor || !window.monaco) return;
+            const model = editor.getModel();
+            if (!model) return;
+            const markers = window.monaco.editor.getModelMarkers({ resource: model.uri });
+            if (!markers || markers.length === 0) {
+                showStatusBarMessage("No diagnostics found");
+                return;
+            }
+            markers.sort((a, b) => {
+                if (a.startLineNumber !== b.startLineNumber) {
+                    return a.startLineNumber - b.startLineNumber;
+                }
+                return a.startColumn - b.startColumn;
+            });
+            const position = editor.getPosition();
+            const curLine = position.lineNumber;
+            const curCol = position.column;
+            let targetMarker = null;
+            if (direction === 1) {
+                targetMarker = markers.find(m => 
+                    m.startLineNumber > curLine || 
+                    (m.startLineNumber === curLine && m.startColumn > curCol)
+                );
+                if (!targetMarker) targetMarker = markers[0];
+            } else {
+                targetMarker = [...markers].reverse().find(m => 
+                    m.startLineNumber < curLine || 
+                    (m.startLineNumber === curLine && m.startColumn < curCol)
+                );
+                if (!targetMarker) targetMarker = markers[markers.length - 1];
+            }
+            if (targetMarker) {
+                editor.setPosition({
+                    lineNumber: targetMarker.startLineNumber,
+                    column: targetMarker.startColumn
+                });
+                editor.revealPositionInCenter({
+                    lineNumber: targetMarker.startLineNumber,
+                    column: targetMarker.startColumn
+                });
+                const severityStr = targetMarker.severity === 8 ? "Error: " : (targetMarker.severity === 4 ? "Warning: " : "Info: ");
+                showStatusBarMessage(`${severityStr}${targetMarker.message} [Line ${targetMarker.startLineNumber}]`);
+            }
+        }
+
+        function getExplorerFiles() {
+            const container = document.querySelector('.filemenu, .fileexplorer, .explorer, #explorer, #explorer-panel');
+            if (!container) return [];
+            
+            const elements = Array.from(container.querySelectorAll('.item, [role="treeitem"], div, span, a, li, p'));
+            const files = [];
+            const seen = new Set();
+            
+            elements.forEach(el => {
+                const text = el.textContent.trim();
+                // Skip headers/accordion controls containing "Explorer"
+                if (text.toLowerCase().startsWith('explorer')) return;
+                
+                // Extract filename using regex matching known code extensions at the end of the string
+                const match = text.match(/(.+\.(ts|js|py))\d*$/i);
+                if (match) {
+                    const filename = match[1].trim();
+                    const lower = filename.toLowerCase();
+                    if (!seen.has(lower)) {
+                        seen.add(lower);
+                        files.push({
+                            name: filename,
+                            element: el
+                        });
+                    }
+                }
+            });
+            return files;
+        }
+
+        function clickExplorerItem(filename) {
+            const files = getExplorerFiles();
+            const target = files.find(f => f.name.toLowerCase() === filename.toLowerCase());
+            if (target) {
+                target.element.click();
+                return true;
+            }
+            // Fallback to text matching outside explorer if explorer list is not found/empty
+            const elements = Array.from(document.querySelectorAll('.explorer-item, .file-item, [data-path], a, span, div, li, p'));
+            const matches = elements.filter(el => {
+                const text = el.textContent.trim().toLowerCase();
+                if (text !== filename.toLowerCase()) return false;
+                const childMatches = Array.from(el.children).some(child => child.textContent.trim().toLowerCase() === filename.toLowerCase());
+                return !childMatches;
+            });
+            if (matches.length > 0) {
+                matches[0].click();
+                return true;
+            }
+            return false;
+        }
+
+        function switchBuffer(direction) {
+            const header = document.querySelector('.filemenu > [role="treeitem"], .filemenu > .item, div[aria-label="File explorer toolbar"]');
+            const wasCollapsed = header && header.getAttribute('aria-expanded') === 'false';
+            if (wasCollapsed) {
+                header.click();
+            }
+            
+            setTimeout(() => {
+                const files = getExplorerFiles();
+                if (files.length <= 1) return;
+                
+                let activeFilename = '';
+                if (window.editor && window.editor.getModel()) {
+                    activeFilename = window.editor.getModel().uri.path.split('/').pop() || '';
+                }
+                
+                let currentIndex = files.findIndex(f => f.name.toLowerCase() === activeFilename.toLowerCase());
+                if (currentIndex === -1) {
+                    currentIndex = files.findIndex(f => f.element.classList.contains('active') || f.element.classList.contains('selected') || f.element.parentElement.classList.contains('active'));
+                }
+                
+                if (currentIndex === -1) {
+                    currentIndex = 0;
+                }
+                
+                const nextIndex = (currentIndex + direction + files.length) % files.length;
+                const targetFile = files[nextIndex];
+                openFileBuffer(targetFile.name);
+            }, wasCollapsed ? 600 : 0);
+        }
+
+        function openFileBuffer(filename) {
+            // 1. If model is already loaded in Monaco, update active pane directly
+            if (window.monaco) {
+                const models = window.monaco.editor.getModels();
+                const targetModel = models.find(m => {
+                    const name = m.uri.path.split('/').pop() || '';
+                    return name.toLowerCase() === filename.toLowerCase();
+                });
+                if (targetModel) {
+                    const activeEditor = window.editor || window._vimSplits.panes[window._vimSplits.activePaneIndex].editor;
+                    if (activeEditor) {
+                        activeEditor.setModel(targetModel);
+                        showStatusBarMessage(`Opened: ${filename}`);
+                        return;
+                    }
+                }
+            }
+
+            // 2. Otherwise, request MakeCode explorer to load the file
+            const header = document.querySelector('.filemenu > [role="treeitem"], .filemenu > .item, div[aria-label="File explorer toolbar"]');
+            const wasCollapsed = header && header.getAttribute('aria-expanded') === 'false';
+            if (wasCollapsed) {
+                header.click();
+            }
+            
+            setTimeout(() => {
+                // If active pane is the secondary split, record main pane model before click
+                const isSplitActive = window._vimSplits && window._vimSplits.panes.length >= 2 && window._vimSplits.activePaneIndex === 1;
+                const previousModel = isSplitActive ? window._vimSplits.panes[0].editor.getModel() : null;
+
+                const clicked = clickExplorerItem(filename);
+                if (clicked) {
+                    showStatusBarMessage(`Opened: ${filename}`);
+                    
+                    // If split is active, MakeCode clicks load the model into main pane (0).
+                    // Move it to split pane (1) and restore main pane model.
+                    if (isSplitActive && previousModel) {
+                        setTimeout(() => {
+                            const newModel = window._vimSplits.panes[0].editor.getModel();
+                            if (newModel && newModel !== previousModel) {
+                                window._vimSplits.panes[1].editor.setModel(newModel);
+                                window._vimSplits.panes[0].editor.setModel(previousModel);
+                            }
+                        }, 300);
+                    }
+                } else {
+                    showStatusBarMessage(`Error: File not found: ${filename}`);
+                }
+            }, wasCollapsed ? 600 : 0);
+        }
+
+        function compileAndRunMakeCode() {
+            const KeyboardEventClass = typeof KeyboardEvent !== 'undefined' ? KeyboardEvent : (window && window.KeyboardEvent);
+            if (KeyboardEventClass) {
+                const runEvent = new KeyboardEventClass('keydown', {
+                    key: 'Enter',
+                    code: 'Enter',
+                    keyCode: 13,
+                    which: 13,
+                    ctrlKey: true,
+                    bubbles: true,
+                    cancelable: true
+                });
+                if (typeof document.dispatchEvent === 'function') {
+                    document.dispatchEvent(runEvent);
+                }
+                if (typeof window.dispatchEvent === 'function') {
+                    window.dispatchEvent(runEvent);
+                }
+            }
+            let playBtn = null;
+            if (typeof document.querySelector === 'function') {
+                playBtn = document.querySelector('button[title*="play" i], button[aria-label*="play" i], button[title*="run" i], button[aria-label*="run" i]');
+            }
+            if (playBtn) {
+                playBtn.click();
+            }
+            showStatusBarMessage("Compilation triggered");
+        }
+
+        function toggleSimulator() {
+            const btn = document.querySelector('button[title*="simulator" i], button[aria-label*="simulator" i], button[title*="run" i], button[aria-label*="run" i], .collapse-button, .toggle-simulator');
+            if (btn) {
+                btn.click();
+                showStatusBarMessage("Toggled Simulator");
+                // Focus the simulator iframe so the user can interact via keyboard immediately
+                setTimeout(() => {
+                    const iframe = document.querySelector('iframe[title*="simulator" i], iframe[id*="simulator" i], #simulator-iframe');
+                    if (iframe) {
+                        iframe.focus();
+                        try {
+                            if (iframe.contentWindow) {
+                                iframe.contentWindow.addEventListener('keydown', (e) => {
+                                    if (e.key === 'Escape') {
+                                        if (window.editor) window.editor.focus();
+                                    }
+                                }, true);
+                            }
+                        } catch (err) {
+                            // Suppress cross-origin security errors
+                        }
+                    }
+                }, 300);
+            } else {
+                showStatusBarMessage("Error: Simulator toggle button not found");
+            }
+        }
+
+        function toggleExplorer() {
+            let btn = document.querySelector('.filemenu > [role="treeitem"], .filemenu > .item, div[aria-label="File explorer toolbar"], .explorer-header, .fileexplorer .header, .fileexplorer .title');
+            if (!btn) {
+                // Fallback: search for elements with class containing 'header' or 'title' that contain 'Explorer'
+                const headers = Array.from(document.querySelectorAll('[class*="header" i], [class*="title" i], div, span, button'));
+                btn = headers.find(el => {
+                    const txt = el.textContent.trim();
+                    return txt.toLowerCase().startsWith('explorer') && el.children.length > 0;
+                });
+            }
+            if (btn) {
+                btn.click();
+                showStatusBarMessage("Toggled Explorer");
+            } else {
+                showStatusBarMessage("Error: Explorer toggle button not found");
+            }
+        }
+
         function bindVimToEditor(editor) {
             if (activeVimInstance) activeVimInstance.dispose();
 
@@ -335,6 +1412,167 @@
                     activeVimInstance = window.MonacoVim.initVimMode(editor, rawOutputElement);
                     console.log("[Native Space] Vim successfully bound with True Powerline CSS.");
 
+                    // Monkeypatch replaceSelections to synchronously update selection/cursor position.
+                    // This fixes the Monaco-Vim dot-repeat bug where synchronous replay inserts all characters at the same initial column.
+                    if (activeVimInstance && typeof activeVimInstance.replaceSelections === 'function') {
+                        activeVimInstance.replaceSelections = function(texts) {
+                            const editor = this.editor;
+                            if (!editor) return;
+                            const selections = editor.getSelections();
+                            if (!selections || selections.length === 0) return;
+                            
+                            const newSelections = [];
+                            editor.executeEdits("vim", selections.map((sel, idx) => {
+                                const text = texts[idx] || "";
+                                const lines = text.split("\n");
+                                const endLine = sel.startLineNumber + lines.length - 1;
+                                const endColumn = (lines.length === 1) ? (sel.startColumn + text.length) : (lines[lines.length - 1].length + 1);
+                                newSelections.push(new monaco.Selection(endLine, endColumn, endLine, endColumn));
+                                return {
+                                    range: sel,
+                                    text: text,
+                                    forceMoveMarkers: true
+                                };
+                            }));
+                            editor.setSelections(newSelections);
+                        };
+                        console.log("[Native Space] replaceSelections monkeypatched successfully.");
+                    }
+
+                    // Patch indentLine on the wrapper prototype to implement correct indent/outdent
+                    try {
+                        const wrapperProto = Object.getPrototypeOf(activeVimInstance);
+                        if (wrapperProto && typeof wrapperProto.indentLine === 'function') {
+                            wrapperProto.indentLine = function(line, indentRight) {
+                                const editor = this.editor;
+                                const model = editor.getModel();
+                                if (!model) return;
+                                
+                                const lineNum = line + 1;
+                                const lineContent = model.getLineContent(lineNum);
+                                const options = model.getOptions();
+                                const tabSize = options.tabSize;
+                                const insertSpaces = options.insertSpaces;
+                                const indentStr = insertSpaces ? ' '.repeat(tabSize) : '\t';
+                                
+                                if (indentRight) {
+                                    editor.executeEdits("vim-indent", [{
+                                        range: new monaco.Range(lineNum, 1, lineNum, 1),
+                                        text: indentStr,
+                                        forceMoveMarkers: true
+                                    }]);
+                                } else {
+                                    let charsToRemove = 0;
+                                    if (lineContent.startsWith('\t')) {
+                                        charsToRemove = 1;
+                                    } else if (lineContent.startsWith(' ')) {
+                                        while (charsToRemove < tabSize && lineContent.charAt(charsToRemove) === ' ') {
+                                            charsToRemove++;
+                                        }
+                                    }
+                                    if (charsToRemove > 0) {
+                                        editor.executeEdits("vim-outdent", [{
+                                            range: new monaco.Range(lineNum, 1, lineNum, charsToRemove + 1),
+                                            text: '',
+                                            forceMoveMarkers: true
+                                        }]);
+                                    }
+                                }
+                            };
+                            console.log("[Native Space] Vim custom indentLine patch applied successfully.");
+                        }
+                    } catch (err) {
+                        console.warn("[Vim Injector] Failed to patch indentLine:", err);
+                    }
+
+                    // Setup Clipboard Sync
+                    setupClipboardSync(editor);
+
+                    // Initialize editor line numbers
+                    updateEditorLineNumbers(editor);
+
+                    // Initialize main split pane
+                    initMainPane(editor);
+
+                    // Maintain active editor and typing state globally
+                    if (!window._vimIntegrationState) {
+                        window._vimIntegrationState = {
+                            justTyped: false,
+                            typeTimeout: null,
+                            hasGlobalKeyInterceptor: false
+                        };
+                    }
+                    window._vimIntegrationState.activeEditor = editor;
+                    window.editor = editor;
+
+                    // Suppress conflicting global MakeCode SPA hotkeys when Monaco is focused
+                    if (!editor._globalKeyInterceptorBound) {
+                        const domNode = editor.getDomNode();
+                        if (domNode && typeof domNode.addEventListener === 'function') {
+                            domNode.addEventListener('keydown', (event) => {
+                                // Let browser shortcuts pass
+                                const isBrowserShortcut = event.key === 'F5' || event.key === 'F12' || (event.ctrlKey && event.shiftKey && event.key === 'I');
+                                if (!isBrowserShortcut) {
+                                    event.stopPropagation();
+                                }
+                            }, false); // false = bubbling phase!
+                            editor._globalKeyInterceptorBound = true;
+                        }
+                    }
+
+                    const preventDotRepeatReset = () => {
+                        try {
+                            const Vim = (window.MonacoVim.VimMode && window.MonacoVim.VimMode.Vim) || window.MonacoVim.Vim;
+                            if (!Vim || typeof Vim.getVimGlobalState_ !== 'function') return;
+                            const globalState = Vim.getVimGlobalState_();
+                            if (globalState && globalState.macroModeState && globalState.macroModeState.lastInsertModeChanges) {
+                                const changesObj = globalState.macroModeState.lastInsertModeChanges;
+                                for (let key in changesObj) {
+                                    if (typeof changesObj[key] === 'boolean') {
+                                        changesObj[key] = false;
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            // Silent catch
+                        }
+                    };
+
+                    // Bind change listener to the new editor
+                    editor.onDidChangeModelContent(() => {
+                        window._vimIntegrationState.justTyped = true;
+                        preventDotRepeatReset();
+                        try {
+                            const Vim = (window.MonacoVim.VimMode && window.MonacoVim.VimMode.Vim) || window.MonacoVim.Vim;
+                            if (Vim && typeof Vim.getVimGlobalState_ === 'function') {
+                                const globalState = Vim.getVimGlobalState_();
+                                if (globalState && globalState.macroModeState && globalState.macroModeState.lastInsertModeChanges) {
+                                    const changes = globalState.macroModeState.lastInsertModeChanges.changes;
+                                    if (changes && changes.length > 0) {
+                                        window._vimIntegrationState.savedChanges = [...changes];
+                                    }
+                                }
+                            }
+                        } catch (e) {}
+                        console.log("[Vim Injector] typing started -> justTyped window activated.");
+                        if (window._vimIntegrationState.typeTimeout) {
+                            clearTimeout(window._vimIntegrationState.typeTimeout);
+                        }
+                        window._vimIntegrationState.typeTimeout = setTimeout(() => {
+                            window._vimIntegrationState.justTyped = false;
+                            console.log("[Vim Injector] typing finished -> justTyped window deactivated.");
+                        }, 2000);
+                    });
+
+                    editor.onDidChangeCursorPosition(() => {
+                        if (window._vimIntegrationState && window._vimIntegrationState.justTyped) {
+                            preventDotRepeatReset();
+                        }
+                        if (window._vimSettings && window._vimSettings.rnu) {
+                            updateEditorLineNumbers(editor);
+                        }
+                    });
+
                     // Inject custom Vim mappings
                     try {
                         const Vim = (window.MonacoVim.VimMode && window.MonacoVim.VimMode.Vim) || window.MonacoVim.Vim;
@@ -342,6 +1580,531 @@
                             // go -> gg (go to top of document)
                             Vim.noremap('go', 'gg', 'normal');
                             Vim.noremap('go', 'gg', 'visual');
+
+                            // Define actions for zz, zt, zb if they are missing
+                            if (typeof Vim.defineAction === 'function' && typeof Vim.mapCommand === 'function') {
+                                Vim.defineAction('scrollToCenter', (cm) => {
+                                    if (typeof cm.moveCurrentLineTo === 'function') {
+                                        cm.moveCurrentLineTo('center');
+                                    }
+                                });
+                                Vim.defineAction('scrollToTop', (cm) => {
+                                    if (typeof cm.moveCurrentLineTo === 'function') {
+                                        cm.moveCurrentLineTo('top');
+                                    }
+                                });
+                                Vim.defineAction('scrollToBottom', (cm) => {
+                                    if (typeof cm.moveCurrentLineTo === 'function') {
+                                        cm.moveCurrentLineTo('bottom');
+                                    }
+                                });
+
+                                Vim.mapCommand('zz', 'action', 'scrollToCenter');
+                                Vim.mapCommand('zt', 'action', 'scrollToTop');
+                                Vim.mapCommand('zb', 'action', 'scrollToBottom');
+                                console.log("[Native Space] Vim custom scroll mappings applied: zz, zt, zb");
+                            }
+
+                             // Define custom normal command `:normal` / `:norm`
+                             if (typeof Vim.defineEx === 'function') {
+                                 Vim.defineEx('normal', 'norm', function(cm, params) {
+                                     if (!params.argString) return;
+                                     
+                                     // Parse key sequence
+                                     const keys = [];
+                                     let i = 0;
+                                     const arg = params.argString;
+                                     while (i < arg.length) {
+                                         if (arg[i] === '<') {
+                                             const endIdx = arg.indexOf('>', i);
+                                             if (endIdx !== -1) {
+                                                 keys.push(arg.slice(i, endIdx + 1));
+                                                 i = endIdx + 1;
+                                                 continue;
+                                             }
+                                         }
+                                         keys.push(arg[i]);
+                                         i++;
+                                     }
+                                     
+                                     const executeKey = (cm, key) => {
+                                         const vimState = cm.state.vim;
+                                         if (vimState && vimState.insertMode) {
+                                             if (key === '<Esc>' || key === '<C-[>') {
+                                                 Vim.handleKey(cm, key);
+                                             } else if (key === '<Enter>' || key === '<CR>') {
+                                                 const cur = cm.getCursor();
+                                                 cm.replaceRange('\n', cur);
+                                                 cm.setCursor({ line: cur.line + 1, ch: 0 });
+                                             } else if (key === '<Tab>') {
+                                                 cm.replaceRange('\t', cm.getCursor());
+                                             } else if (key === '<BS>' || key === '<Backspace>') {
+                                                 const cur = cm.getCursor();
+                                                 if (cur.ch > 0) {
+                                                     cm.replaceRange('', { line: cur.line, ch: cur.ch - 1 }, cur);
+                                                 }
+                                             } else if (key.startsWith('<') && key.endsWith('>')) {
+                                                 // Ignore other special control characters in insert mode
+                                             } else {
+                                                 cm.replaceRange(key, cm.getCursor());
+                                             }
+                                         } else {
+                                             Vim.handleKey(cm, key);
+                                         }
+                                     };
+                                     
+                                     const startLine = params.line !== undefined ? params.line : cm.getCursor().line;
+                                     const endLine = params.lineEnd !== undefined ? params.lineEnd : startLine;
+                                     
+                                     cm.operation(() => {
+                                         const origCursor = cm.getCursor();
+                                         for (let line = startLine; line <= endLine; line++) {
+                                             cm.setCursor({ line: line, ch: 0 });
+                                             for (const key of keys) {
+                                                 executeKey(cm, key);
+                                             }
+                                             if (cm.state.vim && cm.state.vim.insertMode) {
+                                                 Vim.handleKey(cm, '<Esc>');
+                                             }
+                                         }
+                                         if (params.lineStart === undefined) {
+                                             cm.setCursor(origCursor);
+                                         }
+                                     });
+                                });
+
+                                // Define custom `:global` / `:g` command
+                                Vim.defineEx('global', 'g', function(cm, params) {
+                                    if (!params.argString) return;
+                                    const delimiter = params.argString[0];
+                                    const parts = params.argString.split(delimiter);
+                                    if (parts.length < 3) return;
+                                    const patternStr = parts[1];
+                                    const cmdStr = parts.slice(2).join(delimiter);
+                                    
+                                    let pattern;
+                                    try {
+                                        pattern = new RegExp(patternStr);
+                                    } catch (e) {
+                                        console.error("Invalid regex in :global:", e);
+                                        return;
+                                    }
+                                    
+                                    const startLine = params.line !== undefined ? params.line : 0;
+                                    const endLine = params.lineEnd !== undefined ? params.lineEnd : (params.line !== undefined ? params.line : cm.lineCount() - 1);
+                                    const matchedLines = [];
+                                    for (let line = startLine; line <= endLine; line++) {
+                                        if (pattern.test(cm.getLine(line))) {
+                                            matchedLines.push(line);
+                                        }
+                                    }
+                                    
+                                    cm.operation(() => {
+                                        for (let idx = matchedLines.length - 1; idx >= 0; idx--) {
+                                            const line = matchedLines[idx];
+                                            cm.setCursor({ line: line, ch: 0 });
+                                            if (typeof Vim.handleEx === 'function') {
+                                                Vim.handleEx(cm, cmdStr);
+                                            }
+                                        }
+                                    });
+                                });
+
+                                // Define custom `:vglobal` / `:v` command
+                                Vim.defineEx('vglobal', 'v', function(cm, params) {
+                                    if (!params.argString) return;
+                                    const delimiter = params.argString[0];
+                                    const parts = params.argString.split(delimiter);
+                                    if (parts.length < 3) return;
+                                    const patternStr = parts[1];
+                                    const cmdStr = parts.slice(2).join(delimiter);
+                                    
+                                    let pattern;
+                                    try {
+                                        pattern = new RegExp(patternStr);
+                                    } catch (e) {
+                                        console.error("Invalid regex in :vglobal:", e);
+                                        return;
+                                    }
+                                    
+                                    const startLine = params.line !== undefined ? params.line : 0;
+                                    const endLine = params.lineEnd !== undefined ? params.lineEnd : (params.line !== undefined ? params.line : cm.lineCount() - 1);
+                                    const matchedLines = [];
+                                    for (let line = startLine; line <= endLine; line++) {
+                                        if (!pattern.test(cm.getLine(line))) {
+                                            matchedLines.push(line);
+                                        }
+                                    }
+                                    
+                                    cm.operation(() => {
+                                        for (let idx = matchedLines.length - 1; idx >= 0; idx--) {
+                                            const line = matchedLines[idx];
+                                            cm.setCursor({ line: line, ch: 0 });
+                                            if (typeof Vim.handleEx === 'function') {
+                                                Vim.handleEx(cm, cmdStr);
+                                            }
+                                        }
+                                    });
+                                });
+
+                                 // Define custom `:copy` / `:co` command
+                                 Vim.defineEx('copy', 'co', function(cm, params) {
+                                     let destStr = params.argString ? params.argString.trim() : '';
+                                     if (!destStr) return;
+                                     
+                                     const startLine = params.line !== undefined ? params.line : cm.getCursor().line;
+                                     const endLine = params.lineEnd !== undefined ? params.lineEnd : startLine;
+                                     
+                                     let destLine;
+                                     if (destStr === '$') {
+                                         destLine = cm.lineCount();
+                                     } else {
+                                         destLine = parseInt(destStr, 10);
+                                         if (isNaN(destLine)) return;
+                                     }
+                                     
+                                     destLine = Math.max(0, Math.min(cm.lineCount(), destLine));
+                                     
+                                     const linesToCopy = [];
+                                     for (let l = startLine; l <= endLine; l++) {
+                                         linesToCopy.push(cm.getLine(l));
+                                     }
+                                     
+                                     if (window.editor && window.monaco) {
+                                         let insertRange, insertText;
+                                         if (destLine === 0) {
+                                             insertRange = new window.monaco.Range(1, 1, 1, 1);
+                                             insertText = linesToCopy.join('\n') + '\n';
+                                         } else {
+                                             const targetLine = destLine - 1;
+                                             const targetLineLen = cm.getLine(targetLine).length;
+                                             insertRange = new window.monaco.Range(targetLine + 1, targetLineLen + 1, targetLine + 1, targetLineLen + 1);
+                                             insertText = '\n' + linesToCopy.join('\n');
+                                         }
+                                         window.editor.executeEdits('vim-copy', [
+                                             { range: insertRange, text: insertText }
+                                         ]);
+                                     } else {
+                                         cm.operation(() => {
+                                             if (destLine === 0) {
+                                                 const textToInsert = linesToCopy.join('\n') + '\n';
+                                                 cm.replaceRange(textToInsert, { line: 0, ch: 0 });
+                                             } else {
+                                                 const targetLine = destLine - 1;
+                                                 const lineContent = cm.getLine(targetLine);
+                                                 const textToInsert = '\n' + linesToCopy.join('\n');
+                                                 cm.replaceRange(textToInsert, { line: targetLine, ch: lineContent.length });
+                                             }
+                                         });
+                                     }
+                                 });
+
+                                // Define custom `:t` command (alias for :copy)
+                                Vim.defineEx('t', 't', function(cm, params) {
+                                    if (typeof Vim.handleEx === 'function') {
+                                        let rangeStr = '';
+                                        if (params.line !== undefined && params.lineEnd !== undefined) {
+                                            rangeStr = `${params.line + 1},${params.lineEnd + 1}`;
+                                        } else if (params.line !== undefined) {
+                                            rangeStr = `${params.line + 1}`;
+                                        }
+                                        Vim.handleEx(cm, `${rangeStr}co ${params.argString}`);
+                                    }
+                                });
+
+                                 // Define custom `:move` / `:m` command
+                                 Vim.defineEx('move', 'm', function(cm, params) {
+                                     let destStr = params.argString ? params.argString.trim() : '';
+                                     if (!destStr) return;
+                                     
+                                     const startLine = params.line !== undefined ? params.line : cm.getCursor().line;
+                                     const endLine = params.lineEnd !== undefined ? params.lineEnd : startLine;
+                                     
+                                     let destLine;
+                                     if (destStr === '$') {
+                                         destLine = cm.lineCount();
+                                     } else {
+                                         destLine = parseInt(destStr, 10);
+                                         if (isNaN(destLine)) return;
+                                     }
+                                     
+                                     destLine = Math.max(0, Math.min(cm.lineCount(), destLine));
+                                     if (destLine >= startLine && destLine <= endLine + 1) return;
+                                     
+                                     const linesToMove = [];
+                                     for (let l = startLine; l <= endLine; l++) {
+                                         linesToMove.push(cm.getLine(l));
+                                     }
+                                     
+                                     if (window.editor && window.monaco) {
+                                         const editor = window.editor;
+                                         const monaco = window.monaco;
+                                         
+                                         // 1. Define delete range
+                                         let deleteRange;
+                                         if (endLine < cm.lineCount() - 1) {
+                                             deleteRange = new monaco.Range(startLine + 1, 1, endLine + 2, 1);
+                                         } else if (startLine > 0) {
+                                             const prevLineLen = cm.getLine(startLine - 1).length;
+                                             deleteRange = new monaco.Range(startLine, prevLineLen + 1, endLine + 1, cm.getLine(endLine).length + 1);
+                                         } else {
+                                             deleteRange = new monaco.Range(startLine + 1, 1, endLine + 1, cm.getLine(endLine).length + 1);
+                                         }
+                                         
+                                         // 2. Define insert position and text
+                                         let insertRange, insertText;
+                                         if (destLine === 0) {
+                                             insertRange = new monaco.Range(1, 1, 1, 1);
+                                             insertText = linesToMove.join('\n') + '\n';
+                                         } else {
+                                             const targetLine = destLine - 1;
+                                             const targetLineLen = cm.getLine(targetLine).length;
+                                             insertRange = new monaco.Range(targetLine + 1, targetLineLen + 1, targetLine + 1, targetLineLen + 1);
+                                             insertText = '\n' + linesToMove.join('\n');
+                                         }
+                                         
+                                         // Execute both edits atomically
+                                         editor.executeEdits('vim-move', [
+                                             { range: deleteRange, text: '' },
+                                             { range: insertRange, text: insertText }
+                                         ]);
+                                     } else {
+                                         cm.operation(() => {
+                                             const lastLineLen = cm.getLine(endLine).length;
+                                             let rangeStart, rangeEnd;
+                                             if (endLine < cm.lineCount() - 1) {
+                                                 rangeStart = { line: startLine, ch: 0 };
+                                                 rangeEnd = { line: endLine + 1, ch: 0 };
+                                             } else if (startLine > 0) {
+                                                 rangeStart = { line: startLine - 1, ch: cm.getLine(startLine - 1).length };
+                                                 rangeEnd = { line: endLine, ch: lastLineLen };
+                                             } else {
+                                                 rangeStart = { line: startLine, ch: 0 };
+                                                 rangeEnd = { line: endLine, ch: lastLineLen };
+                                             }
+                                             cm.replaceRange('', rangeStart, rangeEnd);
+                                             
+                                             let adjustedDestLine = destLine;
+                                             if (destLine > endLine) {
+                                                 adjustedDestLine -= (endLine - startLine + 1);
+                                             }
+                                             adjustedDestLine = Math.max(0, Math.min(cm.lineCount(), adjustedDestLine));
+                                             
+                                             if (adjustedDestLine === 0) {
+                                                 const textToInsert = linesToMove.join('\n') + '\n';
+                                                 cm.replaceRange(textToInsert, { line: 0, ch: 0 });
+                                             } else {
+                                                 const targetLine = adjustedDestLine - 1;
+                                                 const lineContent = cm.getLine(targetLine);
+                                                 const textToInsert = '\n' + linesToMove.join('\n');
+                                                 cm.replaceRange(textToInsert, { line: targetLine, ch: lineContent.length });
+                                             }
+                                         });
+                                     }
+                                 });
+
+                                // Define custom `:registers` / `:reg` command
+                                Vim.defineEx('registers', 'reg', function(cm, params) {
+                                    try {
+                                        const globalState = Vim.getVimGlobalState_();
+                                        if (!globalState || !globalState.registerController) return;
+                                        const registers = globalState.registerController.registers;
+                                        const lines = ['--- Registers ---'];
+                                        for (let key in registers) {
+                                            const reg = registers[key];
+                                            if (reg && reg.toString()) {
+                                                let val = reg.toString();
+                                                if (val.length > 50) val = val.slice(0, 47) + '...';
+                                                lines.push(`"${key}   ${val.replace(/\n/g, '\\n')}`);
+                                            }
+                                        }
+                                        if (lines.length === 1) {
+                                            lines.push('(no registers populated)');
+                                        }
+                                        showStatusBarMessage(lines.join('\n'));
+                                    } catch (e) {
+                                        console.error("Failed to inspect registers:", e);
+                                    }
+                                });
+
+                                // Define custom `:sort` command
+                                Vim.defineEx('sort', 'sort', function(cm, params) {
+                                    const startLine = params.line !== undefined ? params.line : 0;
+                                    const endLine = params.lineEnd !== undefined ? params.lineEnd : (params.line !== undefined ? params.line : cm.lineCount() - 1);
+                                    
+                                    const lines = [];
+                                    for (let l = startLine; l <= endLine; l++) {
+                                        lines.push(cm.getLine(l));
+                                    }
+                                    
+                                    let reverse = false;
+                                    if (params.force || (params.argString && params.argString.includes('!'))) {
+                                        reverse = true;
+                                    }
+                                    
+                                    lines.sort((a, b) => a.localeCompare(b));
+                                    if (reverse) {
+                                        lines.reverse();
+                                    }
+                                    
+                                    if (window.editor && window.monaco) {
+                                        const edits = [];
+                                        for (let l = startLine; l <= endLine; l++) {
+                                            const lineContent = cm.getLine(l);
+                                            edits.push({
+                                                range: new window.monaco.Range(l + 1, 1, l + 1, lineContent.length + 1),
+                                                text: lines[l - startLine]
+                                            });
+                                        }
+                                        window.editor.executeEdits('vim-sort', edits);
+                                    } else {
+                                        cm.operation(() => {
+                                            for (let l = startLine; l <= endLine; l++) {
+                                                const lineContent = cm.getLine(l);
+                                                cm.replaceRange(lines[l - startLine], { line: l, ch: 0 }, { line: l, ch: lineContent.length });
+                                            }
+                                        });
+                                    }
+                                });
+
+                                // Define custom `:write` / `:w` command to compile and run in MakeCode
+                                Vim.defineEx('write', 'w', function(cm, params) {
+                                    compileAndRunMakeCode();
+                                });
+
+                                // Define custom `:bnext` / `:bn` command to switch to next file buffer
+                                Vim.defineEx('bnext', 'bn', function(cm, params) {
+                                    switchBuffer(1);
+                                });
+
+                                // Define custom `:bprev` / `:bp` command to switch to previous file buffer
+                                Vim.defineEx('bprev', 'bp', function(cm, params) {
+                                    switchBuffer(-1);
+                                });
+
+                                // Define custom `:edit` / `:e` command to open/switch file buffer by name
+                                Vim.defineEx('edit', 'e', function(cm, params) {
+                                    if (params.argString) {
+                                        openFileBuffer(params.argString.trim());
+                                    } else {
+                                        showStatusBarMessage("Error: filename required");
+                                    }
+                                });
+
+                                // Define custom `:simulator` / `:sim` command to toggle simulator panel
+                                Vim.defineEx('simulator', 'sim', function(cm, params) {
+                                    toggleSimulator();
+                                });
+
+                                // Define custom `:explorer` / `:exp` command to toggle explorer panel
+                                Vim.defineEx('explorer', 'exp', function(cm, params) {
+                                    toggleExplorer();
+                                });
+
+                                // Define custom `:set` / `:se` command to configure settings
+                                Vim.defineEx('set', 'se', function(cm, params) {
+                                    if (!window._vimSettings) return;
+                                    const args = params.argString ? params.argString.trim().split(/\s+/) : [];
+                                    if (args.length === 0 || (args.length === 1 && args[0] === "")) {
+                                        showStatusBarMessage(`${window._vimSettings.nu ? "number" : "nonumber"} ${window._vimSettings.rnu ? "relativenumber" : "norelativenumber"}`);
+                                        return;
+                                    }
+                                    
+                                    args.forEach(arg => {
+                                        const clean = arg.trim();
+                                        if (clean === 'number' || clean === 'nu') {
+                                            window._vimSettings.nu = true;
+                                        } else if (clean === 'nonumber' || clean === 'nonu') {
+                                            window._vimSettings.nu = false;
+                                        } else if (clean === 'relativenumber' || clean === 'rnu') {
+                                            window._vimSettings.rnu = true;
+                                        } else if (clean === 'norelativenumber' || clean === 'nornu') {
+                                            window._vimSettings.rnu = false;
+                                        } else if (clean === 'spell' || clean === 'nospell') {
+                                            showStatusBarMessage("Spell check (mock option): " + clean);
+                                        } else if (clean.startsWith('reup')) {
+                                            showStatusBarMessage("reup (mock option): " + clean);
+                                        } else {
+                                            showStatusBarMessage("Unknown option: " + clean);
+                                        }
+                                    });
+                                    
+                                    updateEditorLineNumbers(cm.editor || window.editor);
+                                 });
+
+                                 // Define custom split-screen Ex commands
+                                 Vim.defineEx('vsplit', 'vsp', function(cm, params) {
+                                     createSplitPane('vertical');
+                                     if (params.argString) {
+                                         setTimeout(() => {
+                                             if (window.editor) openFileBuffer(params.argString.trim());
+                                         }, 100);
+                                     }
+                                 });
+
+                                 Vim.defineEx('split', 'sp', function(cm, params) {
+                                     createSplitPane('horizontal');
+                                     if (params.argString) {
+                                         setTimeout(() => {
+                                             if (window.editor) openFileBuffer(params.argString.trim());
+                                         }, 100);
+                                     }
+                                 });
+
+                                 Vim.defineEx('only', 'on', function(cm, params) {
+                                     onlyKeepCurrentPane();
+                                 });
+
+                                 Vim.defineEx('close', 'clo', function(cm, params) {
+                                     closeSplitPane(window._vimSplits.activePaneIndex);
+                                 });
+
+                                 Vim.defineEx('quit', 'q', function(cm, params) {
+                                     if (window._vimSplits && window._vimSplits.panes.length >= 2) {
+                                         closeSplitPane(window._vimSplits.activePaneIndex);
+                                     } else {
+                                         showStatusBarMessage("Only one window open. Use browser tab to exit.");
+                                     }
+                                 });
+
+                                 // Define custom actions for window navigation (Ctrl-W commands)
+                                 Vim.defineAction('cycleWindowFocus', (cm) => {
+                                     if (window._vimSplits && window._vimSplits.panes.length >= 2) {
+                                         const nextIndex = (window._vimSplits.activePaneIndex + 1) % 2;
+                                         window._vimSplits.panes[nextIndex].editor.focus();
+                                     }
+                                 });
+                                 Vim.defineAction('focusLeftOrTopWindow', (cm) => {
+                                     if (window._vimSplits && window._vimSplits.panes.length >= 2) {
+                                         window._vimSplits.panes[0].editor.focus();
+                                     }
+                                 });
+                                 Vim.defineAction('focusRightOrBottomWindow', (cm) => {
+                                     if (window._vimSplits && window._vimSplits.panes.length >= 2) {
+                                         window._vimSplits.panes[1].editor.focus();
+                                     }
+                                 });
+
+                                 Vim.mapCommand('<C-w>w', 'action', 'cycleWindowFocus', {}, { context: 'normal' });
+                                 Vim.mapCommand('<C-w><C-w>', 'action', 'cycleWindowFocus', {}, { context: 'normal' });
+                                 Vim.mapCommand('<C-w>h', 'action', 'focusLeftOrTopWindow', {}, { context: 'normal' });
+                                 Vim.mapCommand('<C-w>k', 'action', 'focusLeftOrTopWindow', {}, { context: 'normal' });
+                                 Vim.mapCommand('<C-w>l', 'action', 'focusRightOrBottomWindow', {}, { context: 'normal' });
+                                 Vim.mapCommand('<C-w>j', 'action', 'focusRightOrBottomWindow', {}, { context: 'normal' });
+
+                                // Define custom actions and mappings for [d and ]d diagnostic jumps
+                                Vim.defineAction('goToPrevDiagnostic', (cm) => {
+                                    jumpToDiagnostic(cm.editor, -1);
+                                });
+                                Vim.defineAction('goToNextDiagnostic', (cm) => {
+                                    jumpToDiagnostic(cm.editor, 1);
+                                });
+                                Vim.mapCommand('[d', 'action', 'goToPrevDiagnostic', {}, { context: 'normal' });
+                                Vim.mapCommand(']d', 'action', 'goToNextDiagnostic', {}, { context: 'normal' });
+
+                                console.log("[Native Space] Vim custom Ex commands applied: :normal, :global, :vglobal, :copy, :move, :registers, :sort, :w, :bn, :bp, :e, :sim, :exp, :set");
+                            }
+
                             console.log("[Native Space] Vim custom mappings applied: go -> gg");
                         } else {
                             console.warn("[Native Space] Vim object or noremap function not found on MonacoVim.");
@@ -349,6 +2112,46 @@
                     } catch (e) {
                         console.error("[Native Space] Failed to register custom Vim mappings:", e);
                     }
+
+                    // Define browser console QA dev tests
+                    window.__runVimTests = async () => {
+                        console.log("%c[Vim QA Suite] Starting in-browser verification...", "font-weight: bold; color: #3b82f6;");
+                        let passCount = 0;
+                        let failCount = 0;
+
+                        const assert = (name, cond) => {
+                            if (cond) {
+                                console.log(`%c✔ PASS: ${name}`, "color: #10b981;");
+                                passCount++;
+                            } else {
+                                console.error(`❌ FAIL: ${name}`);
+                                failCount++;
+                            }
+                        };
+
+                        try {
+                            assert("Vim is initialized and bound to Monaco", !!activeVimInstance);
+                            const Vim = (window.MonacoVim.VimMode && window.MonacoVim.VimMode.Vim) || window.MonacoVim.Vim;
+                            const globalState = Vim.getVimGlobalState_();
+                            assert("Global Vim state exists", !!globalState);
+                            assert("lastInsertModeChanges is patched", globalState.macroModeState.lastInsertModeChanges._isPatched);
+                            assert("Global integration state exists", !!window._vimIntegrationState);
+                            
+                            window._vimIntegrationState.justTyped = true;
+                            globalState.macroModeState.lastInsertModeChanges.maybeReset = true;
+                            assert("maybeReset is blocked while typing", globalState.macroModeState.lastInsertModeChanges.maybeReset === false);
+                            
+                            window._vimIntegrationState.justTyped = false;
+                            globalState.macroModeState.lastInsertModeChanges.maybeReset = true;
+                            assert("maybeReset is allowed when typing inactive", globalState.macroModeState.lastInsertModeChanges.maybeReset === true);
+
+                            console.log(`%c[Vim QA Suite] Completed: ${passCount} passed, ${failCount} failed.`, `font-weight: bold; color: ${failCount === 0 ? '#10b981' : '#ef4444'};`);
+                            return { pass: failCount === 0, passCount, failCount };
+                        } catch (err) {
+                            console.error("[Vim QA Suite] Test suite crashed:", err);
+                            return { pass: false, error: err.message };
+                        }
+                    };
                 }
             }, 100);
             setTimeout(() => clearInterval(checkReady), 10000);
@@ -383,9 +2186,30 @@
             },
             configurable: true
         });
+        if (typeof module !== 'undefined' && module.exports) {
+            module.exports.setupEmacsInsertKeys = setupEmacsInsertKeys;
+            module.exports.bindVimToEditor = bindVimToEditor;
+            module.exports.showStatusBarMessage = showStatusBarMessage;
+            module.exports.updateDiagnosticsSummary = updateDiagnosticsSummary;
+            module.exports.updateFileNameSegment = updateFileNameSegment;
+        }
     }
 
     const logicScriptEl = document.createElement('script');
     logicScriptEl.textContent = `(${nativePageExecution.toString()})();`;
-    document.documentElement.appendChild(logicScriptEl);
+    if (document.documentElement) {
+        document.documentElement.appendChild(logicScriptEl);
+    } else {
+        const checkDoc = setInterval(() => {
+            if (document.documentElement) {
+                clearInterval(checkDoc);
+                document.documentElement.appendChild(logicScriptEl);
+            }
+        }, 5);
+    }
+
+    // Export for Node.js testing
+    if (typeof module !== 'undefined' && module.exports) {
+        module.exports = { nativePageExecution };
+    }
 })();
