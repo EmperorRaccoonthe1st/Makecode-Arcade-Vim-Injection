@@ -183,6 +183,10 @@
             if (!isNormalMode && !window._ctrlWPrefixActive) return;
             
             if (window._ctrlWPrefixActive) {
+                // Ignore modifier keys alone so they don't consume the prefix
+                if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') {
+                    return;
+                }
                 // We have an active Ctrl+w command prefix, handle the next key
                 window._ctrlWPrefixActive = false; // Reset prefix
                 
@@ -204,11 +208,16 @@
                 if (key === 'h' || key === 'k' || (e.ctrlKey && (key === 'h' || key === 'k'))) {
                     e.preventDefault();
                     e.stopPropagation();
-                    if (window._vimSplits && window._vimSplits.panes.length >= 2) {
-                        const targetPane = window._vimSplits.panes[0];
-                        if (targetPane && targetPane.editor) {
-                            targetPane.editor.focus();
-                            showStatusBarMessage("Focused left/top window");
+                    if (e.shiftKey) {
+                        if (key === 'h') resizeSplit('width', -0.05);
+                        else resizeSplit('height', 0.05);
+                    } else {
+                        if (window._vimSplits && window._vimSplits.panes.length >= 2) {
+                            const targetPane = window._vimSplits.panes[0];
+                            if (targetPane && targetPane.editor) {
+                                targetPane.editor.focus();
+                                showStatusBarMessage("Focused left/top window");
+                            }
                         }
                     }
                     return;
@@ -216,11 +225,16 @@
                 if (key === 'l' || key === 'j' || (e.ctrlKey && (key === 'l' || key === 'j'))) {
                     e.preventDefault();
                     e.stopPropagation();
-                    if (window._vimSplits && window._vimSplits.panes.length >= 2) {
-                        const targetPane = window._vimSplits.panes[1];
-                        if (targetPane && targetPane.editor) {
-                            targetPane.editor.focus();
-                            showStatusBarMessage("Focused right/bottom window");
+                    if (e.shiftKey) {
+                        if (key === 'l') resizeSplit('width', 0.05);
+                        else resizeSplit('height', -0.05);
+                    } else {
+                        if (window._vimSplits && window._vimSplits.panes.length >= 2) {
+                            const targetPane = window._vimSplits.panes[1];
+                            if (targetPane && targetPane.editor) {
+                                targetPane.editor.focus();
+                                showStatusBarMessage("Focused right/bottom window");
+                            }
                         }
                     }
                     return;
@@ -2831,6 +2845,57 @@
                                          closeSplitPane(window._vimSplits.activePaneIndex);
                                      } else {
                                          showStatusBarMessage("Only one window open. Use browser tab to exit.");
+                                     }
+                                 });
+
+                                 const executeResize = (arg) => {
+                                     if (!window._vimSplits || window._vimSplits.panes.length < 2) {
+                                         showStatusBarMessage("No split panes to resize");
+                                         return;
+                                     }
+                                     if (!arg) {
+                                         window._vimSplits.splitRatio = 0.5;
+                                         applySplitsLayout();
+                                         showStatusBarMessage("Windows equalized");
+                                         return;
+                                     }
+                                     
+                                     let amount = parseFloat(arg);
+                                     if (isNaN(amount)) {
+                                         showStatusBarMessage("Invalid resize amount: " + arg);
+                                         return;
+                                     }
+                                     
+                                     let isRelative = arg.startsWith('+') || arg.startsWith('-');
+                                     let ratio = window._vimSplits.splitRatio || 0.5;
+                                     
+                                     if (isRelative) {
+                                         const change = (amount / 100) * (window._vimSplits.activePaneIndex === 0 ? 1 : -1);
+                                         ratio = Math.max(0.1, Math.min(0.9, ratio + change));
+                                     } else {
+                                         ratio = Math.max(0.1, Math.min(0.9, amount / 100));
+                                     }
+                                     
+                                     window._vimSplits.splitRatio = ratio;
+                                     applySplitsLayout();
+                                     showStatusBarMessage(`Window resized: ${Math.round(ratio * 100)}% / ${Math.round((1 - ratio) * 100)}%`);
+                                 };
+
+                                 Vim.defineEx('resize', 'res', function(cm, params) {
+                                     executeResize(params.argString ? params.argString.trim() : '');
+                                 });
+
+                                 Vim.defineEx('vresize', 'vres', function(cm, params) {
+                                     executeResize(params.argString ? params.argString.trim() : '');
+                                 });
+
+                                 Vim.defineEx('vertical', 'vert', function(cm, params) {
+                                     const arg = params.argString ? params.argString.trim() : '';
+                                     if (arg.startsWith('resize') || arg.startsWith('res')) {
+                                         const resizeArg = arg.replace(/^(resize|res)\s*/, '');
+                                         executeResize(resizeArg);
+                                     } else {
+                                         showStatusBarMessage("Unsupported vertical modifier command: " + arg);
                                      }
                                  });
 
