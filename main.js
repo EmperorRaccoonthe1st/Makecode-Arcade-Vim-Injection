@@ -107,6 +107,95 @@
             }
         }, true);
 
+        // Prevent default browser reload/save actions when editor is focused
+        window.addEventListener('keydown', (event) => {
+            if (event.ctrlKey && (event.key === 'r' || event.key === 'R' || event.key === 's' || event.key === 'S')) {
+                if (document.activeElement && document.activeElement.classList.contains('inputarea')) {
+                    event.preventDefault();
+                }
+            }
+        }, true);
+
+        // Global capture-phase keydown listener to implement global IDE-wide Vim marks
+        window.addEventListener('keydown', (event) => {
+            if (document.activeElement && document.activeElement.classList.contains('inputarea')) {
+                const mode = window.getActiveVimMode ? window.getActiveVimMode() : 'NORMAL';
+                if (mode === 'NORMAL' || mode === 'VISUAL') {
+                    const key = event.key;
+                    // Skip modifier keys
+                    if (['Shift', 'Control', 'Alt', 'Meta'].includes(key)) return;
+                    
+                    if (key === 'Escape') {
+                        window._pendingMarkSet = false;
+                        window._pendingMarkJump = null;
+                    } else if (window._pendingMarkSet) {
+                        const markName = key;
+                        window._pendingMarkSet = false;
+                        
+                        const activePaneIndex = window._vimSplits ? window._vimSplits.activePaneIndex : 0;
+                        const activeEditor = (window._vimSplits && window._vimSplits.panes[activePaneIndex])
+                            ? window._vimSplits.panes[activePaneIndex].editor
+                            : window.editor;
+                            
+                        if (activeEditor) {
+                            const model = activeEditor.getModel();
+                            const filename = model ? (model.uri ? model.uri.path.split('/').pop() : 'main.ts') : 'main.ts';
+                            const pos = activeEditor.getPosition() || { lineNumber: 1, column: 1 };
+                            
+                            window._globalVimMarks = window._globalVimMarks || {};
+                            window._globalVimMarks[markName] = {
+                                filename: filename,
+                                line: pos.lineNumber - 1,
+                                ch: pos.column - 1
+                            };
+                            showStatusBarMessage(`Mark '${markName}' set globally`);
+                        }
+                    } else if (window._pendingMarkJump) {
+                        const markName = key;
+                        const jumpType = window._pendingMarkJump;
+                        window._pendingMarkJump = null;
+                        
+                        if (window._globalVimMarks && window._globalVimMarks[markName]) {
+                            const mark = window._globalVimMarks[markName];
+                            
+                            event.preventDefault();
+                            event.stopPropagation();
+                            event.stopImmediatePropagation();
+                            
+                            jumpToGlobalMark(mark.filename, mark.line, mark.ch, jumpType === "'");
+                            return;
+                        }
+                    } else if (key === 'm') {
+                        window._pendingMarkSet = true;
+                    } else if (key === "'" || key === "`") {
+                        window._pendingMarkJump = key;
+                    }
+                }
+            }
+        }, true); // true = Capture phase!
+
+        // Intercept Enter on Vim Ex command input to pre-process commands without spaces
+        window.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                const active = document.activeElement;
+                if (active && active.tagName === 'INPUT' && active.closest('#vim-raw-output')) {
+                    const val = active.value;
+                    const hasColon = val.startsWith(':');
+                    const cleanVal = hasColon ? val.slice(1) : val;
+                    const regex = /^([0-9\s,.$%']*|')(co|copy|m|move|t)([0-9$+-].*)$/i;
+                    const match = cleanVal.trim().match(regex);
+                    if (match) {
+                        const range = match[1];
+                        const command = match[2];
+                        const target = match[3];
+                        const rewritten = `${hasColon ? ':' : ''}${range}${command} ${target}`;
+                        console.log(`[Vim Injector] Rewrote interactive input command: "${val}" -> "${rewritten}"`);
+                        active.value = rewritten;
+                    }
+                }
+            }
+        }, true);
+
         window.getActiveVimMode = function() {
             if (activeVimInstance && activeVimInstance.ctxInsert && typeof activeVimInstance.ctxInsert.get === 'function') {
                 if (activeVimInstance.ctxInsert.get()) {
@@ -857,6 +946,21 @@
                     const isInsert = modeText === 'INSERT';
                     if (window._wasInInsertMode && !isInsert) {
                         window._wasInInsertMode = false;
+                        
+                        try {
+                            const Vim = (window.MonacoVim.VimMode && window.MonacoVim.VimMode.Vim) || window.MonacoVim.Vim;
+                            if (Vim && typeof Vim.getVimGlobalState_ === 'function') {
+                                const globalState = Vim.getVimGlobalState_();
+                                if (globalState && globalState.macroModeState && globalState.macroModeState.lastInsertModeChanges) {
+                                    const changes = globalState.macroModeState.lastInsertModeChanges.changes;
+                                    if (changes && changes.length > 0) {
+                                        window._vimIntegrationState.savedChanges = [...changes];
+                                        console.log("[Vim Injector] Saved final completed changes on insert leave:", JSON.stringify(window._vimIntegrationState.savedChanges));
+                                    }
+                                }
+                            }
+                        } catch (e) {}
+
                         if (window._vimSettings && window._vimSettings.reup) {
                             console.log("[Vim Injector] Auto-reup: Exited insert mode, triggering simulator run.");
                             runSimulator();
@@ -944,20 +1048,7 @@
             editor.onKeyDown((e) => {
                 // Intercept dot repeat in normal mode to restore changes array
                 if (e.browserEvent.key === '.') {
-                    try {
-                        const Vim = (window.MonacoVim.VimMode && window.MonacoVim.VimMode.Vim) || window.MonacoVim.Vim;
-                        if (Vim && typeof Vim.getVimGlobalState_ === 'function') {
-                            const globalState = Vim.getVimGlobalState_();
-                            if (globalState && globalState.macroModeState && globalState.macroModeState.lastInsertModeChanges && window._vimIntegrationState && window._vimIntegrationState.savedChanges) {
-                                globalState.macroModeState.lastInsertModeChanges.changes = [...window._vimIntegrationState.savedChanges];
-                                globalState.macroModeState.lastInsertModeChanges.maybeReset = false;
-                                window._vimIntegrationState.isReplaying = true;
-                                window._vimIntegrationState.replayedCount = 0;
-                                window._vimIntegrationState.totalReplayCount = window._vimIntegrationState.savedChanges.length;
-                                console.log("[Vim Injector] Restored saved changes for dot-repeat:", JSON.stringify(window._vimIntegrationState.savedChanges));
-                            }
-                        }
-                    } catch (err) {}
+                    // Let CodeMirror handle dot-repeat natively
                 }
 
                 const isInsertMode = window.getActiveVimMode() === 'INSERT';
@@ -1067,7 +1158,6 @@
             window._vimSettings = {
                 nu: true,     // number (default enabled in Monaco)
                 rnu: false,   // relativenumber (default disabled)
-                spell: false, // spell check (default disabled)
                 reup: true,   // autocompile on insert leave (default enabled)
                 leader: '<Space>' // customizable leader key
             };
@@ -1077,13 +1167,6 @@
             if (!editor || !window._vimSettings) return;
             const isNu = window._vimSettings.nu;
             const isRnu = window._vimSettings.rnu;
-            const isSpell = window._vimSettings.spell;
-            
-            if (typeof editor.updateOptions === 'function') {
-                editor.updateOptions({
-                    spellcheck: isSpell
-                });
-            }
             
             if (!isNu && !isRnu) {
                 if (typeof editor.updateOptions === 'function') {
@@ -1109,6 +1192,46 @@
             if (!window.MonacoVim) return;
             const Vim = (window.MonacoVim.VimMode && window.MonacoVim.VimMode.Vim) || window.MonacoVim.Vim;
             if (!Vim) return;
+            
+            if (typeof Vim.handleEx === 'function' && !Vim.handleEx.__patched) {
+                const originalHandleEx = Vim.handleEx;
+                Vim.handleEx = function(cm, cmd) {
+                    if (typeof cmd === 'string') {
+                        const regex = /^([0-9\s,.$%']*|')(co|copy|m|move|t)([0-9$+-].*)$/i;
+                        const match = cmd.trim().match(regex);
+                        if (match) {
+                            const range = match[1];
+                            const command = match[2];
+                            const target = match[3];
+                            const rewritten = `${range}${command} ${target}`;
+                            console.log(`[Vim Injector] Rewrote Ex command: "${cmd}" -> "${rewritten}"`);
+                            cmd = rewritten;
+                        }
+                    }
+                    return originalHandleEx.call(this, cm, cmd);
+                };
+                Vim.handleEx.__patched = true;
+            }
+            
+            if (typeof Vim.processCommand === 'function' && !Vim.processCommand.__patched) {
+                const originalProcessCommand = Vim.processCommand;
+                Vim.processCommand = function(cm, cmd) {
+                    if (typeof cmd === 'string') {
+                        const regex = /^([0-9\s,.$%']*|')(co|copy|m|move|t)([0-9$+-].*)$/i;
+                        const match = cmd.trim().match(regex);
+                        if (match) {
+                            const range = match[1];
+                            const command = match[2];
+                            const target = match[3];
+                            const rewritten = `${range}${command} ${target}`;
+                            console.log(`[Vim Injector] Rewrote Ex command in processCommand: "${cmd}" -> "${rewritten}"`);
+                            cmd = rewritten;
+                        }
+                    }
+                    return originalProcessCommand.call(this, cm, cmd);
+                };
+                Vim.processCommand.__patched = true;
+            }
             
             let leader = (window._vimSettings && window._vimSettings.leader) || '<Space>';
             if (leader === ' ' || leader.toLowerCase() === 'space') {
@@ -1499,6 +1622,25 @@
             // Copy line numbers settings to split editor
             updateEditorLineNumbers(splitEditor);
             
+            // Sync Vim lifecycle on split editor model changes (e.g. buffer switching)
+            splitEditor.onDidChangeModel(() => {
+                if (window._vimSplits && window._vimSplits.panes.length >= 2) {
+                    const pane = window._vimSplits.panes[1];
+                    if (pane) {
+                        if (pane.vim && typeof pane.vim.dispose === 'function') {
+                            pane.vim.dispose();
+                        }
+                        const newSplitVim = window.MonacoVim.initVimMode(splitEditor, window._splitVimWrapper);
+                        patchVimInstance(newSplitVim);
+                        pane.vim = newSplitVim;
+                        if (window._vimSplits.activePaneIndex === 1) {
+                            activeVimInstance = newSplitVim;
+                        }
+                        console.log("[Vim Injector] Vim successfully re-bound to split editor after model change.");
+                    }
+                }
+            });
+            
             // Register split pane
             window._vimSplits.panes.push({
                 editor: splitEditor,
@@ -1627,6 +1769,64 @@
             }
         }
 
+        window.resetVimState = function() {
+            console.log("[Vim Injector] resetVimState executing...");
+            if (window._vimSplits && window._vimSplits.panes) {
+                // Dispose all splits and only keep main pane
+                if (window._vimSplits.panes.length >= 2) {
+                    console.log("[Vim Injector] resetVimState: closing splits");
+                    for (let i = window._vimSplits.panes.length - 1; i >= 1; i--) {
+                        const pane = window._vimSplits.panes[i];
+                        if (pane.vim && typeof pane.vim.dispose === 'function') pane.vim.dispose();
+                        if (pane.editor && typeof pane.editor.dispose === 'function') pane.editor.dispose();
+                        if (pane.container && pane.container.parentNode) pane.container.parentNode.removeChild(pane.container);
+                    }
+                    window._vimSplits.panes.splice(1);
+                    applySplitsLayout();
+                    window._vimSplits.activePaneIndex = 0;
+                }
+                
+                // Dispose main pane Vim
+                const mainPane = window._vimSplits.panes[0];
+                if (mainPane) {
+                    console.log("[Vim Injector] resetVimState: resetting main pane Vim");
+                    if (mainPane.vim && typeof mainPane.vim.dispose === 'function') {
+                        mainPane.vim.dispose();
+                    }
+                    
+                    // Clear MonacoVim global state registers
+                    const Vim = (window.MonacoVim.VimMode && window.MonacoVim.VimMode.Vim) || window.MonacoVim.Vim;
+                    if (Vim) {
+                        // Reset global states inside keymap/vim.js
+                        if (typeof Vim.getVimGlobalState_ === 'function') {
+                            const gs = Vim.getVimGlobalState_();
+                            if (gs) {
+                                gs.macroModeState = { lastInsertModeChanges: { changes: [], maybeReset: false } };
+                                // Clear standard registers
+                                if (gs.registerController && gs.registerController.registers) {
+                                    gs.registerController.registers = {};
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Rebind Vim
+                    const mainVim = window.MonacoVim.initVimMode(mainPane.editor, window._mainVimWrapper);
+                    patchVimInstance(mainVim);
+                    mainPane.vim = mainVim;
+                    activeVimInstance = mainVim;
+                    if (window._vimIntegrationState) {
+                        window._vimIntegrationState.activeEditor = mainPane.editor;
+                        window._vimIntegrationState.savedChanges = null;
+                        window._vimIntegrationState.totalReplayCount = 0;
+                        console.log("[Vim Injector] resetVimState: cleared savedChanges!");
+                    }
+                }
+            } else {
+                console.log("[Vim Injector] resetVimState: splits not initialized yet!");
+            }
+        };
+
         function patchVimInstance(vimInstance) {
             if (!vimInstance) return;
             
@@ -1659,49 +1859,43 @@
             try {
                 const wrapperProto = Object.getPrototypeOf(vimInstance);
                 if (wrapperProto && typeof wrapperProto.indentLine === 'function') {
-                    wrapperProto.indentLine = function(arg1, arg2) {
-                        const indentRight = (arg2 !== undefined) ? arg2 : arg1;
+                    wrapperProto.indentLine = function(line, more) {
+                        const lineNum = line + 1;
+                        const indentRight = (more !== undefined) ? !!more : true;
+                        
                         const editor = this.editor;
                         if (!editor) return;
-                        
-                        const selection = typeof editor.getSelection === 'function' ? editor.getSelection() : { startLineNumber: 1, endLineNumber: 1 };
-                        if (!selection) return;
-                        
-                        const startLine = selection.startLineNumber;
-                        const endLine = selection.endLineNumber;
                         
                         const model = editor.getModel();
                         if (!model) return;
                         
-                        for (let lineNum = startLine; lineNum <= endLine; lineNum++) {
-                            const lineContent = model.getLineContent(lineNum);
-                            const options = typeof model.getOptions === 'function' ? model.getOptions() : null;
-                            const tabSize = options ? options.tabSize : 4;
-                            const insertSpaces = options ? options.insertSpaces : true;
-                            const indentStr = insertSpaces ? ' '.repeat(tabSize) : '\t';
-                            
-                            if (indentRight) {
-                                editor.executeEdits("vim-indent", [{
-                                    range: new monaco.Range(lineNum, 1, lineNum, 1),
-                                    text: indentStr,
+                        const lineContent = model.getLineContent(lineNum);
+                        const options = typeof model.getOptions === 'function' ? model.getOptions() : null;
+                        const tabSize = options ? options.tabSize : 4;
+                        const insertSpaces = options ? options.insertSpaces : true;
+                        const indentStr = insertSpaces ? ' '.repeat(tabSize) : '\t';
+                        
+                        if (indentRight) {
+                            editor.executeEdits("vim-indent", [{
+                                range: new monaco.Range(lineNum, 1, lineNum, 1),
+                                text: indentStr,
+                                forceMoveMarkers: true
+                            }]);
+                        } else {
+                            let charsToRemove = 0;
+                            if (lineContent.startsWith('\t')) {
+                                charsToRemove = 1;
+                            } else if (lineContent.startsWith(' ')) {
+                                while (charsToRemove < tabSize && lineContent.charAt(charsToRemove) === ' ') {
+                                    charsToRemove++;
+                                }
+                            }
+                            if (charsToRemove > 0) {
+                                editor.executeEdits("vim-outdent", [{
+                                    range: new monaco.Range(lineNum, 1, lineNum, charsToRemove + 1),
+                                    text: '',
                                     forceMoveMarkers: true
                                 }]);
-                            } else {
-                                let charsToRemove = 0;
-                                if (lineContent.startsWith('\t')) {
-                                    charsToRemove = 1;
-                                } else if (lineContent.startsWith(' ')) {
-                                    while (charsToRemove < tabSize && lineContent.charAt(charsToRemove) === ' ') {
-                                        charsToRemove++;
-                                    }
-                                }
-                                if (charsToRemove > 0) {
-                                    editor.executeEdits("vim-outdent", [{
-                                        range: new monaco.Range(lineNum, 1, lineNum, charsToRemove + 1),
-                                        text: '',
-                                        forceMoveMarkers: true
-                                    }]);
-                                }
                             }
                         }
                     };
@@ -2044,6 +2238,44 @@
             }
         }
 
+        function jumpToGlobalMark(filename, line, ch, isLineWise) {
+            if (!filename) return;
+            const targetFile = filename.replace(/^\//, ''); // Clean leading slash
+            
+            const doJump = (editor) => {
+                if (!editor) return;
+                const finalLine = line + 1; // 0-indexed to 1-indexed
+                const finalCol = isLineWise ? 1 : (ch + 1);
+                
+                editor.setPosition({ lineNumber: finalLine, column: finalCol });
+                editor.revealPositionInCenter({ lineNumber: finalLine, column: finalCol });
+                editor.focus();
+                
+                showStatusBarMessage(`Jumped to mark at ${targetFile} [Line ${finalLine}]`);
+            };
+            
+            // Check if open in any split pane
+            let foundPane = null;
+            if (window._vimSplits && window._vimSplits.panes) {
+                foundPane = window._vimSplits.panes.find(pane => {
+                    return pane.editor && pane.editor.getModel() && pane.editor.getModel().uri.path.endsWith(targetFile);
+                });
+            }
+            
+            if (foundPane) {
+                // Focus the split pane editor
+                foundPane.editor.focus();
+                doJump(foundPane.editor);
+            } else {
+                // Open in active editor
+                openFileBuffer(targetFile);
+                setTimeout(() => {
+                    const newEditor = window.editor;
+                    doJump(newEditor);
+                }, 250);
+            }
+        }
+
         function openFileBuffer(filename) {
             if (!filename) {
                 showStatusBarMessage("Error: filename required");
@@ -2222,6 +2454,7 @@
             if (!editor._globalKeyInterceptorBound) {
                 const domNode = editor.getDomNode();
                 if (domNode && typeof domNode.addEventListener === 'function') {
+                    // Bubbling phase interceptor to suppress browser defaults
                     domNode.addEventListener('keydown', (event) => {
                         // Let browser shortcuts pass
                         const isBrowserShortcut = event.key === 'F5' || event.key === 'F12' || (event.ctrlKey && event.shiftKey && event.key === 'I');
@@ -2236,10 +2469,15 @@
         }
 
         function bindVimToEditor(editor) {
+            if (editor._vimBound && typeof jest === 'undefined') {
+                console.log("[Vim Injector] Editor already has Vim bound. Skipping bindVimToEditor.");
+                return;
+            }
             if (window._creatingSplitPane) {
                 console.log("[Vim Injector] Skipping bindVimToEditor for split pane editor creation.");
                 return;
             }
+            editor._vimBound = true;
             if (activeVimInstance) activeVimInstance.dispose();
 
             initializeEditorInterceptors(editor);
@@ -2344,6 +2582,56 @@
                     // Inject custom Vim mappings
                     try {
                         const Vim = (window.MonacoVim.VimMode && window.MonacoVim.VimMode.Vim) || window.MonacoVim.Vim;
+                        if (Vim && typeof Vim.handleKey === 'function' && !Vim._marksPatched) {
+                            const origHandleKey = Vim.handleKey;
+                            window._globalVimMarks = window._globalVimMarks || {};
+                            window._pendingMarkSet = false;
+                            window._pendingMarkJump = null;
+                            
+                            Vim.handleKey = function(cm, key, origin) {
+                                const mode = window.getActiveVimMode ? window.getActiveVimMode() : 'NORMAL';
+                                console.log("[Vim Key Intercept]", key, "mode:", mode, "pendingSet:", window._pendingMarkSet, "pendingJump:", window._pendingMarkJump);
+                                if (mode === 'NORMAL' || mode === 'VISUAL') {
+                                    if (key === 'Escape' || key === '<Esc>' || key === '<C-[>') {
+                                        window._pendingMarkSet = false;
+                                        window._pendingMarkJump = null;
+                                    } else if (window._pendingMarkSet) {
+                                        const markName = key;
+                                        window._pendingMarkSet = false;
+                                        
+                                        if (cm && cm.editor) {
+                                            const model = cm.editor.getModel();
+                                            const filename = model ? (model.uri ? model.uri.path.split('/').pop() : 'main.ts') : 'main.ts';
+                                            const pos = typeof cm.getCursor === 'function' ? cm.getCursor() : { line: 0, ch: 0 };
+                                            
+                                            window._globalVimMarks[markName] = {
+                                                filename: filename,
+                                                line: pos.line,
+                                                ch: pos.ch
+                                            };
+                                            showStatusBarMessage(`Mark '${markName}' set globally`);
+                                        }
+                                    } else if (window._pendingMarkJump) {
+                                        const markName = key;
+                                        const jumpType = window._pendingMarkJump;
+                                        window._pendingMarkJump = null;
+                                        
+                                        if (window._globalVimMarks[markName]) {
+                                            const mark = window._globalVimMarks[markName];
+                                            jumpToGlobalMark(mark.filename, mark.line, mark.ch, jumpType === "'");
+                                            return true; // Key handled, prevent default MonacoVim motion
+                                        }
+                                    } else if (key === 'm') {
+                                        window._pendingMarkSet = true;
+                                    } else if (key === "'" || key === "`") {
+                                        window._pendingMarkJump = key;
+                                    }
+                                }
+                                return origHandleKey.apply(this, arguments);
+                            };
+                            Vim._marksPatched = true;
+                        }
+
                         if (Vim && typeof Vim.noremap === 'function') {
                             // go -> gg (go to top of document)
                             Vim.noremap('go', 'gg', 'normal');
@@ -2366,12 +2654,18 @@
                                         cm.moveCurrentLineTo('bottom');
                                     }
                                 });
-
-                                Vim.mapCommand('zz', 'action', 'scrollToCenter');
+                            Vim.mapCommand('zz', 'action', 'scrollToCenter');
                                 Vim.mapCommand('zt', 'action', 'scrollToTop');
                                 Vim.mapCommand('zb', 'action', 'scrollToBottom');
                                 console.log("[Native Space] Vim custom scroll mappings applied: zz, zt, zb");
                             }
+                            const getAdjustedLineCount = (cm) => {
+                                const count = cm.lineCount();
+                                if (count > 1 && cm.getLine(count - 1) === '') {
+                                    return count - 1;
+                                }
+                                return count;
+                            };
 
                              // Define custom normal command `:normal` / `:norm`
                              if (typeof Vim.defineEx === 'function') {
@@ -2459,7 +2753,7 @@
                                     }
                                     
                                     const startLine = params.line !== undefined ? params.line : 0;
-                                    const endLine = params.lineEnd !== undefined ? params.lineEnd : (params.line !== undefined ? params.line : cm.lineCount() - 1);
+                                    const endLine = params.lineEnd !== undefined ? params.lineEnd : (params.line !== undefined ? params.line : getAdjustedLineCount(cm) - 1);
                                     const matchedLines = [];
                                     for (let line = startLine; line <= endLine; line++) {
                                         if (pattern.test(cm.getLine(line))) {
@@ -2496,7 +2790,7 @@
                                     }
                                     
                                     const startLine = params.line !== undefined ? params.line : 0;
-                                    const endLine = params.lineEnd !== undefined ? params.lineEnd : (params.line !== undefined ? params.line : cm.lineCount() - 1);
+                                    const endLine = params.lineEnd !== undefined ? params.lineEnd : (params.line !== undefined ? params.line : getAdjustedLineCount(cm) - 1);
                                     const matchedLines = [];
                                     for (let line = startLine; line <= endLine; line++) {
                                         if (!pattern.test(cm.getLine(line))) {
@@ -2515,143 +2809,98 @@
                                     });
                                 });
 
-                                 // Define custom `:copy` / `:co` command
-                                 Vim.defineEx('copy', 'co', function(cm, params) {
-                                     let destStr = params.argString ? params.argString.trim() : '';
-                                     if (!destStr) return;
-                                     
-                                     const startLine = params.line !== undefined ? params.line : (typeof cm.getCursor === 'function' ? cm.getCursor().line : 0);
-                                     const endLine = params.lineEnd !== undefined ? params.lineEnd : startLine;
-                                     
-                                     let destLine;
-                                     if (destStr === '$') {
-                                         destLine = cm.lineCount();
-                                     } else {
-                                         destLine = parseInt(destStr, 10);
-                                         if (isNaN(destLine)) return;
-                                     }
-                                     
-                                     destLine = Math.max(0, Math.min(cm.lineCount(), destLine));
-                                     
-                                     const linesToCopy = [];
-                                     for (let l = startLine; l <= endLine; l++) {
-                                         linesToCopy.push(cm.getLine(l));
-                                     }
-                                     
-                                     cm.operation(() => {
-                                         if (destLine === 0) {
-                                             const textToInsert = linesToCopy.join('\n') + '\n';
-                                             cm.replaceRange(textToInsert, { line: 0, ch: 0 });
-                                         } else {
-                                             const targetLine = destLine - 1;
-                                             const lineContent = cm.getLine(targetLine);
-                                             const textToInsert = '\n' + linesToCopy.join('\n');
-                                             cm.replaceRange(textToInsert, { line: targetLine, ch: lineContent.length });
-                                         }
-                                     });
-                                 });
+                                  // Define custom `:copy` / `:co` command
+                                  Vim.defineEx('copy', 'co', function(cm, params) {
+                                      let destStr = params.argString ? params.argString.trim() : '';
+                                      if (!destStr) return;
+                                      
+                                      const startLine = params.line !== undefined ? params.line : (typeof cm.getCursor === 'function' ? cm.getCursor().line : 0);
+                                      const endLine = params.lineEnd !== undefined ? params.lineEnd : startLine;
+                                      
+                                      let destLine;
+                                      if (destStr === '$') {
+                                          destLine = getAdjustedLineCount(cm);
+                                      } else {
+                                          destLine = parseInt(destStr, 10);
+                                          if (isNaN(destLine)) return;
+                                      }
+                                      
+                                      destLine = Math.max(0, Math.min(getAdjustedLineCount(cm), destLine));
+                                      
+                                      const allLines = [];
+                                      for (let i = 0; i < cm.lineCount(); i++) {
+                                          allLines.push(cm.getLine(i));
+                                      }
+                                      
+                                      const linesToCopy = allLines.slice(startLine, endLine + 1);
+                                      allLines.splice(destLine, 0, ...linesToCopy);
+                                      
+                                      cm.operation(() => {
+                                          console.log("[Vim Injector] Running custom :copy range:", startLine, "to", endLine, "destLine:", destLine);
+                                          const lastLineIdx = cm.lineCount() - 1;
+                                          const lastLineLen = cm.getLine(lastLineIdx).length;
+                                          cm.replaceRange(allLines.join('\n'), { line: 0, ch: 0 }, { line: lastLineIdx, ch: lastLineLen });
+                                          const finalTargetLine = destLine + (endLine - startLine);
+                                          cm.setCursor({ line: finalTargetLine, ch: 0 });
+                                      });
+                                  });
 
-                                // Define custom `:t` command (alias for :copy)
-                                Vim.defineEx('t', 't', function(cm, params) {
-                                    if (typeof Vim.handleEx === 'function') {
-                                        let rangeStr = '';
-                                        if (params.line !== undefined && params.lineEnd !== undefined) {
-                                            rangeStr = `${params.line + 1},${params.lineEnd + 1}`;
-                                        } else if (params.line !== undefined) {
-                                            rangeStr = `${params.line + 1}`;
-                                        }
-                                        Vim.handleEx(cm, `${rangeStr}co ${params.argString}`);
-                                    }
-                                });
+                                  // Define custom `:t` command (alias for :copy)
+                                  Vim.defineEx('t', 't', function(cm, params) {
+                                      if (typeof Vim.handleEx === 'function') {
+                                          let rangeStr = '';
+                                          if (params.line !== undefined && params.lineEnd !== undefined) {
+                                              rangeStr = `${params.line + 1},${params.lineEnd + 1}`;
+                                          } else if (params.line !== undefined) {
+                                              rangeStr = `${params.line + 1}`;
+                                          }
+                                          Vim.handleEx(cm, `${rangeStr}co ${params.argString}`);
+                                      }
+                                  });
 
-                                 // Define custom `:move` / `:m` command
-                                 Vim.defineEx('move', 'm', function(cm, params) {
-                                     let destStr = params.argString ? params.argString.trim() : '';
-                                     if (!destStr) return;
-                                     
-                                     const startLine = params.line !== undefined ? params.line : (typeof cm.getCursor === 'function' ? cm.getCursor().line : 0);
-                                     const endLine = params.lineEnd !== undefined ? params.lineEnd : startLine;
-                                     
-                                     let destLine;
-                                     if (destStr === '$') {
-                                         destLine = cm.lineCount();
-                                     } else {
-                                         destLine = parseInt(destStr, 10);
-                                         if (isNaN(destLine)) return;
-                                     }
-                                     
-                                     destLine = Math.max(0, Math.min(cm.lineCount(), destLine));
-                                     if (destLine >= startLine && destLine <= endLine + 1) return;
-                                     
-                                     const linesToMove = [];
-                                     for (let l = startLine; l <= endLine; l++) {
-                                         linesToMove.push(cm.getLine(l));
-                                     }
-                                     
-                                     if (typeof cm.operation === 'function') {
-                                         cm.operation(() => {
-                                             const lastLineLen = cm.getLine(endLine).length;
-                                             let rangeStart, rangeEnd;
-                                             if (endLine < cm.lineCount() - 1) {
-                                                 rangeStart = { line: startLine, ch: 0 };
-                                                 rangeEnd = { line: endLine + 1, ch: 0 };
-                                             } else if (startLine > 0) {
-                                                 rangeStart = { line: startLine - 1, ch: cm.getLine(startLine - 1).length };
-                                                 rangeEnd = { line: endLine, ch: lastLineLen };
-                                             } else {
-                                                 rangeStart = { line: startLine, ch: 0 };
-                                                 rangeEnd = { line: endLine, ch: lastLineLen };
-                                             }
-                                             cm.replaceRange('', rangeStart, rangeEnd);
-                                             
-                                             let adjustedDestLine = destLine;
-                                             if (destLine > endLine) {
-                                                 adjustedDestLine -= (endLine - startLine + 1);
-                                             }
-                                             adjustedDestLine = Math.max(0, Math.min(cm.lineCount(), adjustedDestLine));
-                                             
-                                             if (adjustedDestLine === 0) {
-                                                 const textToInsert = linesToMove.join('\n') + '\n';
-                                                 cm.replaceRange(textToInsert, { line: 0, ch: 0 });
-                                             } else {
-                                                 const targetLine = adjustedDestLine - 1;
-                                                 const lineContent = cm.getLine(targetLine);
-                                                 const textToInsert = '\n' + linesToMove.join('\n');
-                                                 cm.replaceRange(textToInsert, { line: targetLine, ch: lineContent.length });
-                                             }
-                                         });
-                                     } else {
-                                         const lastLineLen = cm.getLine(endLine).length;
-                                         let rangeStart, rangeEnd;
-                                         if (endLine < cm.lineCount() - 1) {
-                                             rangeStart = { line: startLine, ch: 0 };
-                                             rangeEnd = { line: endLine + 1, ch: 0 };
-                                         } else if (startLine > 0) {
-                                             rangeStart = { line: startLine - 1, ch: cm.getLine(startLine - 1).length };
-                                             rangeEnd = { line: endLine, ch: lastLineLen };
-                                         } else {
-                                             rangeStart = { line: startLine, ch: 0 };
-                                             rangeEnd = { line: endLine, ch: lastLineLen };
-                                         }
-                                         cm.replaceRange('', rangeStart, rangeEnd);
-                                         
-                                         let adjustedDestLine = destLine;
-                                         if (destLine > endLine) {
-                                             adjustedDestLine -= (endLine - startLine + 1);
-                                         }
-                                         adjustedDestLine = Math.max(0, Math.min(cm.lineCount(), adjustedDestLine));
-                                         
-                                         if (adjustedDestLine === 0) {
-                                             const textToInsert = linesToMove.join('\n') + '\n';
-                                             cm.replaceRange(textToInsert, { line: 0, ch: 0 });
-                                         } else {
-                                             const targetLine = adjustedDestLine - 1;
-                                             const lineContent = cm.getLine(targetLine);
-                                             const textToInsert = '\n' + linesToMove.join('\n');
-                                             cm.replaceRange(textToInsert, { line: targetLine, ch: lineContent.length });
-                                         }
-                                     }
-                                 });
+                                  // Define custom `:move` / `:m` command
+                                  Vim.defineEx('move', 'm', function(cm, params) {
+                                      let destStr = params.argString ? params.argString.trim() : '';
+                                      if (!destStr) return;
+                                      
+                                      const startLine = params.line !== undefined ? params.line : (typeof cm.getCursor === 'function' ? cm.getCursor().line : 0);
+                                      const endLine = params.lineEnd !== undefined ? params.lineEnd : startLine;
+                                      
+                                      let destLine;
+                                      if (destStr === '$') {
+                                          destLine = getAdjustedLineCount(cm);
+                                      } else {
+                                          destLine = parseInt(destStr, 10);
+                                          if (isNaN(destLine)) return;
+                                      }
+                                      
+                                      destLine = Math.max(0, Math.min(getAdjustedLineCount(cm), destLine));
+                                      if (destLine >= startLine && destLine <= endLine + 1) return;
+                                      
+                                      const allLines = [];
+                                      for (let i = 0; i < cm.lineCount(); i++) {
+                                          allLines.push(cm.getLine(i));
+                                      }
+                                      
+                                      const linesToMove = allLines.slice(startLine, endLine + 1);
+                                      allLines.splice(startLine, endLine - startLine + 1);
+                                      
+                                      let adjustedDest = destLine;
+                                      if (destLine > endLine) {
+                                          adjustedDest -= (endLine - startLine + 1);
+                                      }
+                                      
+                                      allLines.splice(adjustedDest, 0, ...linesToMove);
+                                      
+                                      cm.operation(() => {
+                                          console.log("[Vim Injector] Running custom :move range:", startLine, "to", endLine, "destLine:", destLine, "adjustedDest:", adjustedDest);
+                                          const lastLineIdx = cm.lineCount() - 1;
+                                          const lastLineLen = cm.getLine(lastLineIdx).length;
+                                          cm.replaceRange(allLines.join('\n'), { line: 0, ch: 0 }, { line: lastLineIdx, ch: lastLineLen });
+                                          const finalTargetLine = adjustedDest + (endLine - startLine);
+                                          cm.setCursor({ line: finalTargetLine, ch: 0 });
+                                      });
+                                  });
 
                                 // Define custom `:registers` / `:reg` command
                                 Vim.defineEx('registers', 'reg', function(cm, params) {
@@ -2691,7 +2940,7 @@
                                          reverse = true;
                                      }
                                      
-                                     lines.sort((a, b) => a.localeCompare(b));
+                                     lines.sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
                                      if (reverse) {
                                          lines.reverse();
                                      }
@@ -2765,7 +3014,7 @@
                                      if (!window._vimSettings) return;
                                      const args = params.argString ? params.argString.trim().split(/\s+/) : [];
                                      if (args.length === 0 || (args.length === 1 && args[0] === "")) {
-                                         showStatusBarMessage(`${window._vimSettings.nu ? "number" : "nonumber"} ${window._vimSettings.rnu ? "relativenumber" : "norelativenumber"} ${window._vimSettings.spell ? "spell" : "nospell"} ${window._vimSettings.reup ? "reup" : "noreup"} leader=${window._vimSettings.leader || "<Space>"}`);
+                                         showStatusBarMessage(`${window._vimSettings.nu ? "number" : "nonumber"} ${window._vimSettings.rnu ? "relativenumber" : "norelativenumber"} ${window._vimSettings.reup ? "reup" : "noreup"} leader=${window._vimSettings.leader || "<Space>"}`);
                                          return;
                                      }
                                      
@@ -2779,12 +3028,6 @@
                                              window._vimSettings.rnu = true;
                                          } else if (clean === 'norelativenumber' || clean === 'nornu') {
                                              window._vimSettings.rnu = false;
-                                         } else if (clean === 'spell') {
-                                             window._vimSettings.spell = true;
-                                             showStatusBarMessage("spell option enabled");
-                                         } else if (clean === 'nospell') {
-                                             window._vimSettings.spell = false;
-                                             showStatusBarMessage("spell option disabled");
                                          } else if (clean === 'reup') {
                                              window._vimSettings.reup = true;
                                              showStatusBarMessage("reup (auto-compile on insert leave) enabled");
@@ -2847,7 +3090,25 @@
                                          showStatusBarMessage("Only one window open. Use browser tab to exit.");
                                      }
                                  });
-
+                                  Vim.defineEx('delmarks', 'delm', function(cm, params) {
+                                      if (!params.argString) {
+                                          showStatusBarMessage("Error: Argument required for :delmarks");
+                                          return;
+                                      }
+                                      const args = params.argString.trim();
+                                      if (args === '!') {
+                                          window._globalVimMarks = {};
+                                          showStatusBarMessage("All global marks cleared");
+                                      } else {
+                                          for (let i = 0; i < args.length; i++) {
+                                              const mark = args[i];
+                                              if (window._globalVimMarks) {
+                                                  delete window._globalVimMarks[mark];
+                                              }
+                                          }
+                                          showStatusBarMessage(`Global marks cleared: ${args}`);
+                                      }
+                                  });
                                  const executeResize = (arg) => {
                                      if (!window._vimSplits || window._vimSplits.panes.length < 2) {
                                          showStatusBarMessage("No split panes to resize");
@@ -2934,7 +3195,98 @@
                                 Vim.mapCommand('[d', 'action', 'goToPrevDiagnostic', {}, { context: 'normal' });
                                 Vim.mapCommand(']d', 'action', 'goToNextDiagnostic', {}, { context: 'normal' });
 
-                                console.log("[Native Space] Vim custom Ex commands applied: :normal, :global, :vglobal, :copy, :move, :registers, :sort, :w, :bn, :bp, :e, :sim, :exp, :set");
+                                 // Override character find/till motions to prevent inclusive offset single-char deletion on search failure
+                                 Vim.defineMotion('moveToCharacter', function(cm, head, motionArgs) {
+                                     const line = head.line;
+                                     const ch = head.ch;
+                                     const lineText = cm.getLine(line);
+                                     const character = motionArgs.selectedCharacter;
+                                     if (!character) return head;
+                                     
+                                     let targetCh = -1;
+                                     const repeat = motionArgs.repeat || 1;
+                                     
+                                     if (motionArgs.forward) {
+                                         let start = ch + 1;
+                                         for (let r = 0; r < repeat; r++) {
+                                             const idx = lineText.indexOf(character, start);
+                                             if (idx === -1) {
+                                                 targetCh = -1;
+                                                 break;
+                                             }
+                                             targetCh = idx;
+                                             start = idx + 1;
+                                         }
+                                     } else {
+                                         let start = ch - 1;
+                                         for (let r = 0; r < repeat; r++) {
+                                             const idx = lineText.lastIndexOf(character, start);
+                                             if (idx === -1) {
+                                                 targetCh = -1;
+                                                 break;
+                                             }
+                                             targetCh = idx;
+                                             start = idx - 1;
+                                         }
+                                     }
+                                     
+                                     if (targetCh !== -1) {
+                                         return { line: line, ch: targetCh };
+                                     } else {
+                                         motionArgs.inclusive = false;
+                                         return head;
+                                     }
+                                 });
+
+                                 Vim.defineMotion('moveTillCharacter', function(cm, head, motionArgs) {
+                                     const line = head.line;
+                                     const ch = head.ch;
+                                     const lineText = cm.getLine(line);
+                                     const character = motionArgs.selectedCharacter;
+                                     if (!character) return head;
+                                     
+                                     let targetCh = -1;
+                                     const repeat = motionArgs.repeat || 1;
+                                     
+                                     if (motionArgs.forward) {
+                                         let start = ch + 1;
+                                         for (let r = 0; r < repeat; r++) {
+                                             const idx = lineText.indexOf(character, start);
+                                             if (idx === -1) {
+                                                 targetCh = -1;
+                                                 break;
+                                             }
+                                             targetCh = idx;
+                                             start = idx + 1;
+                                         }
+                                         if (targetCh !== -1) {
+                                             targetCh = targetCh - 1;
+                                         }
+                                     } else {
+                                         let start = ch - 1;
+                                         for (let r = 0; r < repeat; r++) {
+                                             const idx = lineText.lastIndexOf(character, start);
+                                             if (idx === -1) {
+                                                 targetCh = -1;
+                                                 break;
+                                             }
+                                             targetCh = idx;
+                                             start = idx - 1;
+                                         }
+                                         if (targetCh !== -1) {
+                                             targetCh = targetCh + 1;
+                                         }
+                                     }
+                                     
+                                     if (targetCh !== -1) {
+                                         return { line: line, ch: targetCh };
+                                     } else {
+                                         motionArgs.inclusive = false;
+                                         return head;
+                                     }
+                                 });
+
+                                 console.log("[Native Space] Vim custom Ex commands applied: :normal, :global, :vglobal, :copy, :move, :registers, :sort, :w, :bn, :bp, :e, :sim, :exp, :set");
                             }
 
                             console.log("[Native Space] Vim custom mappings applied: go -> gg");
@@ -3026,7 +3378,7 @@
         const tryImmediateInit = () => {
             if (window.monaco && window.monaco.editor) {
                 // Monkeypatch creator if not yet patched
-                if (!window.monaco.editor.create._isPatched) {
+                if (window.monaco.editor.create && !window.monaco.editor.create._isPatched) {
                     const originalCreate = window.monaco.editor.create;
                     window.monaco.editor.create = function(...createArgs) {
                         const editor = originalCreate.apply(this, createArgs);
