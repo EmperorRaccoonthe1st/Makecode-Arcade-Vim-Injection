@@ -658,7 +658,7 @@
                         position: absolute; bottom: 0; left: 0; width: 100%; height: var(--pl-height);
                         background: var(--pl-bg-gradient); border-top: 1px solid var(--pl-border);
                         display: flex; justify-content: space-between; align-items: stretch;
-                        z-index: 9999;
+                        z-index: 2 !important;
                         font-size: 11px; font-weight: 700;
                         box-sizing: content-box !important;
                         line-height: 1 !important;
@@ -752,6 +752,7 @@
                         font-size: 13px !important;
                         font-weight: 500 !important;
                         line-height: 24px !important;
+                        white-space: nowrap !important;
                     }
 
                     /* Target the Key Buffer span specifically (keep it small & styled like right-hand badges) */
@@ -777,7 +778,8 @@
                         font-size: 13px !important; /* Scaled up to match editor canvas */
                         font-weight: 500 !important; /* Refined to medium weight */
                         height: 24px !important; /* Fixed height to prevent vertical expansion */
-                        width: 100% !important;
+                        width: auto !important;
+                        flex-grow: 1 !important;
                         box-shadow: none !important;
                         line-height: 24px !important; /* Locked vertical centering */
                     }
@@ -794,6 +796,10 @@
                         align-items: center !important;
                         background: transparent !important;
                         z-index: 10 !important;
+                    }
+
+                    .monaco-vim-dialog span, .vim-command-line span {
+                        white-space: nowrap !important;
                     }
 
                     /* --- MESSAGE AREA --- */
@@ -924,6 +930,19 @@
 
                 window._wasInInsertMode = false;
                 const observer = new MutationObserver(() => {
+                    const cleanPromptNodes = (parent) => {
+                        parent.childNodes.forEach(node => {
+                            if (node.nodeType === Node.TEXT_NODE && node.textContent.includes('JavaScript regexp')) {
+                                observer.disconnect();
+                                node.textContent = node.textContent.replace(/\s*\(JavaScript regexp\):?\s*/g, '');
+                                observer.observe(rawOutput, { childList: true, subtree: true, characterData: true });
+                            } else if (node.nodeType === Node.ELEMENT_NODE) {
+                                cleanPromptNodes(node);
+                            }
+                        });
+                    };
+                    cleanPromptNodes(rawOutput);
+
                     const textContent = rawOutput.textContent.toUpperCase();
                     let modeText = 'NORMAL';
                     let modeClass = 'mode-normal';
@@ -952,6 +971,33 @@
                             if (Vim && typeof Vim.getVimGlobalState_ === 'function') {
                                 const globalState = Vim.getVimGlobalState_();
                                 if (globalState && globalState.macroModeState && globalState.macroModeState.lastInsertModeChanges) {
+                                    if (window._vimIntegrationState.recordedChanges && window._vimIntegrationState.recordedChanges.length > 0) {
+                                        // Flush any pending auto-close brackets that are still present in the editor after the cursor
+                                        if (window._vimIntegrationState.pendingAutoClose && window._vimIntegrationState.pendingAutoClose.length > 0) {
+                                            try {
+                                                const editor = window.editor;
+                                                const pos = editor && editor.getPosition();
+                                                const model = editor && editor.getModel();
+                                                if (pos && model) {
+                                                    const lineText = model.getLineContent(pos.lineNumber);
+                                                    const afterCursor = lineText.substring(pos.column - 1);
+                                                    console.log("[Vim Injector] Flush check:", { pos: JSON.stringify(pos), lineText, afterCursor, pendingAutoClose: JSON.stringify(window._vimIntegrationState.pendingAutoClose) });
+                                                    let remainingText = afterCursor;
+                                                    window._vimIntegrationState.pendingAutoClose.forEach(char => {
+                                                        const idx = remainingText.indexOf(char);
+                                                        if (idx !== -1) {
+                                                            window._vimIntegrationState.recordedChanges.push(char);
+                                                            remainingText = remainingText.substring(0, idx) + remainingText.substring(idx + 1);
+                                                        }
+                                                    });
+                                                }
+                                            } catch (err) {
+                                                console.error("[Vim Injector] Error flushing pending auto-close:", err);
+                                            }
+                                            window._vimIntegrationState.pendingAutoClose = [];
+                                        }
+                                        globalState.macroModeState.lastInsertModeChanges.changes = [...window._vimIntegrationState.recordedChanges];
+                                    }
                                     const changes = globalState.macroModeState.lastInsertModeChanges.changes;
                                     if (changes && changes.length > 0) {
                                         window._vimIntegrationState.savedChanges = [...changes];
@@ -965,6 +1011,14 @@
                             console.log("[Vim Injector] Auto-reup: Exited insert mode, triggering simulator run.");
                             runSimulator();
                         }
+                    }
+                    if (isInsert && !window._wasInInsertMode) {
+                        if (!window._vimIntegrationState) {
+                            window._vimIntegrationState = {};
+                        }
+                        window._vimIntegrationState.recordedChanges = [];
+                        window._vimIntegrationState.pendingAutoClose = [];
+                        console.log("[Vim Injector] Entered Insert Mode: initialized recordedChanges.");
                     }
                     if (isInsert) {
                         window._wasInInsertMode = true;
@@ -986,6 +1040,17 @@
                     const hasInput = rawOutput.querySelector('input');
                     if (msgArea && hasInput) {
                         msgArea.style.display = 'none';
+                    }
+
+                    // Hide the key buffer span (e.g. showing duplicate '/') when command/search input is active
+                    const keyBufferSpan = rawOutput.querySelector('span[style*="float: right"]');
+                    if (keyBufferSpan) {
+                        const targetDisplay = hasInput ? 'none' : '';
+                        if (keyBufferSpan.style.display !== targetDisplay) {
+                            observer.disconnect();
+                            keyBufferSpan.style.display = targetDisplay;
+                            observer.observe(rawOutput, { childList: true, subtree: true, characterData: true });
+                        }
                     }
 
                     // Suppress "-- NORMAL --" or other mode display spans inside raw output
@@ -1050,9 +1115,16 @@
                 if (e.browserEvent.key === '.') {
                     // Let CodeMirror handle dot-repeat natively
                 }
-
                 const isInsertMode = window.getActiveVimMode() === 'INSERT';
                 if (!isInsertMode) return;
+
+                const pressedKey = e.browserEvent.key;
+                if (window._vimIntegrationState.pendingAutoClose && window._vimIntegrationState.pendingAutoClose.length > 0) {
+                    if (pressedKey === window._vimIntegrationState.pendingAutoClose[0]) {
+                        window._vimIntegrationState.pendingAutoClose.shift();
+                        window._vimIntegrationState.recordedChanges.push(pressedKey);
+                    }
+                }
 
                 const key = e.browserEvent.key.toLowerCase();
                 const ctrl = e.ctrlKey;
@@ -1833,10 +1905,69 @@
             // Monkeypatch replaceSelections to support synchronous cursor updates (e.g. for dot-repeat E2E tests)
             if (typeof vimInstance.replaceSelections === 'function') {
                 vimInstance.replaceSelections = function(texts) {
+                    if (typeof texts === 'string') {
+                        texts = [texts];
+                    }
                     const editor = this.editor;
                     if (!editor) return;
                     const selections = editor.getSelections();
                     if (!selections || selections.length === 0) return;
+                    
+                    let hasBS = false;
+                    if (Array.isArray(texts)) {
+                        for (let i = 0; i < texts.length; i++) {
+                            if (texts[i] === '<BS>') {
+                                hasBS = true;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (hasBS) {
+                        const newSelections = [];
+                        const edits = [];
+                        selections.forEach((sel, idx) => {
+                            const text = texts[idx] || texts[0] || "";
+                            if (text === '<BS>') {
+                                if (sel.isEmpty()) {
+                                    const pos = sel.getPosition();
+                                    if (pos.column > 1) {
+                                        const newCol = pos.column - 1;
+                                        newSelections.push(new monaco.Selection(pos.lineNumber, newCol, pos.lineNumber, newCol));
+                                        edits.push({
+                                            range: new monaco.Range(pos.lineNumber, newCol, pos.lineNumber, pos.column),
+                                            text: "",
+                                            forceMoveMarkers: false
+                                        });
+                                    } else {
+                                        newSelections.push(sel);
+                                    }
+                                } else {
+                                    newSelections.push(new monaco.Selection(sel.startLineNumber, sel.startColumn, sel.startLineNumber, sel.startColumn));
+                                    edits.push({
+                                        range: sel,
+                                        text: "",
+                                        forceMoveMarkers: false
+                                    });
+                                }
+                            } else {
+                                const lines = text.split("\n");
+                                const endLine = sel.startLineNumber + lines.length - 1;
+                                const endColumn = (lines.length === 1) ? (sel.startColumn + text.length) : (lines[lines.length - 1].length + 1);
+                                newSelections.push(new monaco.Selection(endLine, endColumn, endLine, endColumn));
+                                edits.push({
+                                    range: sel,
+                                    text: text,
+                                    forceMoveMarkers: true
+                                });
+                            }
+                        });
+                        if (edits.length > 0) {
+                            editor.executeEdits("vim", edits);
+                        }
+                        editor.setSelections(newSelections);
+                        return;
+                    }
                     
                     const newSelections = [];
                     editor.executeEdits("vim", selections.map((sel, idx) => {
@@ -2488,6 +2619,8 @@
                     clearInterval(checkReady);
                     if (!window.MonacoVim) return;
 
+
+
                     const rawOutputElement = createStatusBar(editor);
                     if (!window._mainVimWrapper) {
                         window._mainVimWrapper = document.createElement('div');
@@ -2515,7 +2648,8 @@
                         window._vimIntegrationState = {
                             justTyped: false,
                             typeTimeout: null,
-                            hasGlobalKeyInterceptor: false
+                            hasGlobalKeyInterceptor: false,
+                            recordedChanges: []
                         };
                     }
                     window._vimIntegrationState.activeEditor = editor;
@@ -2540,12 +2674,47 @@
                     };
 
                     // Bind change listener to the new editor
-                    editor.onDidChangeModelContent(() => {
+                    editor.onDidChangeModelContent((e) => {
                         window._vimIntegrationState.justTyped = true;
                         
                         const isInsert = window.getActiveVimMode() === 'INSERT';
                         if (isInsert) {
                             preventDotRepeatReset();
+                            
+                            // Build custom change log for dot-repeat (aligning deletes & autocompletes)
+                            if (!window._vimIntegrationState.recordedChanges) {
+                                window._vimIntegrationState.recordedChanges = [];
+                            }
+                            if (e && e.changes) {
+                                e.changes.forEach(change => {
+                                    for (let i = 0; i < change.rangeLength; i++) {
+                                        window._vimIntegrationState.recordedChanges.push('<BS>');
+                                    }
+                                    if (change.text) {
+                                        let textToRecord = change.text;
+                                        if (change.text.length === 2) {
+                                            const first = change.text.charAt(0);
+                                            const second = change.text.charAt(1);
+                                            if ((first === '(' && second === ')') ||
+                                                (first === '[' && second === ']') ||
+                                                (first === '{' && second === '}') ||
+                                                (first === '"' && second === '"') ||
+                                                (first === "'" && second === "'") ||
+                                                (first === '`' && second === '`')) {
+                                                textToRecord = first;
+                                                if (!window._vimIntegrationState.pendingAutoClose) {
+                                                    window._vimIntegrationState.pendingAutoClose = [];
+                                                }
+                                                window._vimIntegrationState.pendingAutoClose.unshift(second);
+                                            }
+                                        }
+                                        for (let i = 0; i < textToRecord.length; i++) {
+                                            window._vimIntegrationState.recordedChanges.push(textToRecord.charAt(i));
+                                        }
+                                    }
+                                });
+                            }
+                            
                             try {
                                 const Vim = (window.MonacoVim.VimMode && window.MonacoVim.VimMode.Vim) || window.MonacoVim.Vim;
                                 if (Vim && typeof Vim.getVimGlobalState_ === 'function') {
