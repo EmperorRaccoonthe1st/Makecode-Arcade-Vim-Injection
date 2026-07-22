@@ -620,6 +620,9 @@
                 style.textContent = `
                     @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;700&display=swap');
 
+                    /* Hide MakeCode default problems popup */
+                    .errorList { display: none !important; }
+
                     :root {
                         --pl-bg: #121212; /* Darkened empty track background */
                         --pl-bg-gradient: #121212; /* Flat terminal background */
@@ -655,22 +658,23 @@
                     }
 
                     #neovim-bar-wrapper {
-                        position: absolute; bottom: 0; left: 0; width: 100%; height: var(--pl-height);
+                        position: absolute; bottom: 0; left: 0; width: 100%; min-height: var(--pl-height); height: auto;
                         background: var(--pl-bg-gradient); border-top: 1px solid var(--pl-border);
-                        display: flex; justify-content: space-between; align-items: stretch;
+                        display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch;
                         z-index: 2 !important;
                         font-size: 11px; font-weight: 700;
                         box-sizing: content-box !important;
                         line-height: 1 !important;
-                        box-shadow: 0 -1px 5px rgba(0, 0, 0, 0.15) !important; /* Tightened upward shadow */
+                        box-shadow: 0 -1px 5px rgba(0, 0, 0, 0.15) !important;
                     }
 
                     #neovim-status-line {
                         width: 100%;
-                        height: 100%;
+                        min-height: var(--pl-height); height: auto;
                         display: flex;
                         justify-content: space-between;
-                        align-items: stretch;
+                        align-items: flex-end;
+                        flex-shrink: 0;
                     }
 
                     #neovim-status-line * {
@@ -679,8 +683,8 @@
                         box-sizing: border-box;
                     }
 
-                    .vim-left-zone { display: flex; align-items: stretch; flex-grow: 1; }
-                    .vim-right-zone { display: flex; align-items: stretch; background: var(--pl-bg-gradient); flex-shrink: 0; }
+                    .vim-left-zone { display: flex; align-items: flex-end; flex-grow: 1; }
+                    .vim-right-zone { display: flex; align-items: flex-end; background: var(--pl-bg-gradient); flex-shrink: 0; height: var(--pl-height); }
 
                     /* --- PURE CSS POWERLINE SEGMENTS (LEFT) --- */
                     #vim-mode-segment {
@@ -688,7 +692,7 @@
                         display: flex; align-items: center; justify-content: center;
                         padding: 0 10px 0 15px !important; color: #1f1f1f !important; text-transform: uppercase;
                         letter-spacing: 0.5px; z-index: 10;
-                        height: 100%;
+                        height: var(--pl-height);
                         white-space: nowrap;
                         flex-shrink: 0;
                         line-height: 1 !important;
@@ -725,17 +729,22 @@
                     /* --- CENTER AREA CONTAINER --- */
                     #neovim-center-container {
                         flex-grow: 1;
-                        display: flex;
+                        display: grid;
+                        grid-template-columns: 1fr;
+                        grid-template-rows: 1fr;
                         align-items: center;
                         position: relative;
                         padding-left: calc(var(--pl-arrow-w) + 12px) !important;
-                        padding-right: calc(var(--pl-arrow-w) + 6px) !important; /* clear right-to-left chevrons */
-                        height: 100%;
+                        padding-right: calc(var(--pl-arrow-w) + 6px) !important;
+                        min-height: var(--pl-height);
+                        height: auto;
+                        align-self: stretch;
                     }
 
                     /* --- RAW OUTPUT & COMMAND PALETTE --- */
                     #vim-raw-output {
-                        width: 100%; height: 100%; 
+                        grid-column: 1; grid-row: 1;
+                        width: 100%; min-height: var(--pl-height); height: auto;
                         display: flex !important; align-items: center !important; justify-content: flex-start !important;
                         gap: 4px !important;
                         color: #ffffff !important;
@@ -802,38 +811,39 @@
                         white-space: nowrap !important;
                     }
 
-                    /* --- MESSAGE AREA --- */
                     #neovim-message-area {
-                        position: absolute;
-                        left: calc(var(--pl-arrow-w) + 16px);
-                        right: 10px;
+                        grid-column: 1; grid-row: 1;
+                        position: relative;
                         display: none;
                         align-items: center;
                         color: var(--pl-text);
                         font-weight: normal;
-                        overflow: hidden;
-                        white-space: nowrap;
-                        text-overflow: ellipsis;
+                        white-space: pre-wrap;
+                        word-break: break-word;
                         z-index: 2;
                         cursor: pointer;
+                        width: 100%;
+                        max-height: 40vh;
+                        overflow-y: auto;
+                        font-family: "Fira Code", ui-monospace, monospace !important;
+                        font-size: 13px !important;
+                        line-height: 1.4 !important;
                     }
 
-                    #neovim-message-tooltip {
+                    #neovim-message-panel {
                         display: none;
-                        position: absolute;
-                        bottom: 28px;
-                        left: 20px;
-                        max-width: 450px;
-                        background: #1e1e2e;
-                        color: #cdd6f4;
-                        border: 1px solid #45475a;
-                        border-radius: 4px;
-                        padding: 8px 12px;
-                        z-index: 10000;
-                        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+                        padding: 8px 16px 8px 24px;
+                        background: transparent;
+                        color: var(--pl-text);
                         white-space: pre-wrap;
+                        word-break: break-word;
                         font-family: inherit;
-                        font-size: 11px;
+                        font-size: 12px;
+                        line-height: 1.4;
+                        border-top: none;
+                        max-height: 40vh;
+                        overflow-y: auto;
+                        font-weight: normal;
                     }
 
                     /* --- PURE CSS POWERLINE SEGMENTS (RIGHT) --- */
@@ -841,7 +851,7 @@
                         position: relative; display: flex; align-items: center; justify-content: center;
                         padding: 0 20px 0 12px !important; /* 12px left, 20px right to clear 12px incoming left chevron tip */
                         white-space: nowrap;
-                        height: 100%;
+                        height: var(--pl-height);
                         flex-shrink: 0;
                         line-height: 1 !important;
                         margin: 0 !important;
@@ -891,7 +901,6 @@
                                 <div id="vim-raw-output"></div>
                                 <div id="neovim-message-area">
                                     <span class="message-text"></span>
-                                    <div id="neovim-message-tooltip"></div>
                                 </div>
                             </div>
                         </div>
@@ -914,19 +923,41 @@
                 const msgArea = wrapper.querySelector('#neovim-message-area');
                 const msgTooltip = wrapper.querySelector('#neovim-message-tooltip');
 
-                // Set up hover event for message area tooltip
-                if (msgArea && msgTooltip) {
-                    msgArea.addEventListener('mouseenter', () => {
-                        const textSpan = msgArea.querySelector('.message-text');
-                        if (textSpan && textSpan.textContent.trim().length > 0) {
-                            msgTooltip.textContent = textSpan.textContent;
-                            msgTooltip.style.display = 'block';
+                // Set up click event to toggle message panel manually
+                if (msgArea) {
+                    msgArea.addEventListener('click', () => {
+                        const isExpanded = msgArea.style.whiteSpace === 'pre-wrap';
+                        if (isExpanded) {
+                            msgArea.style.whiteSpace = 'nowrap';
+                            msgArea.style.overflow = 'hidden';
+                            msgArea.style.textOverflow = 'ellipsis';
+                            msgArea.style.paddingTop = '0px';
+                            msgArea.style.paddingBottom = '0px';
+                            window._isMessageExpanded = false;
+                        } else {
+                            msgArea.style.whiteSpace = 'pre-wrap';
+                            msgArea.style.overflow = 'visible';
+                            msgArea.style.textOverflow = 'clip';
+                            msgArea.style.paddingTop = '8px';
+                            msgArea.style.paddingBottom = '8px';
+                            window._isMessageExpanded = true;
                         }
                     });
-                    msgArea.addEventListener('mouseleave', () => {
-                        msgTooltip.style.display = 'none';
-                    });
                 }
+                
+                // Global escape to close expanded message panel
+                window.addEventListener('keydown', (e) => {
+                    if (e.key === 'Escape') {
+                        if (msgArea && msgArea.style.whiteSpace === 'pre-wrap') {
+                            msgArea.style.whiteSpace = 'nowrap';
+                            msgArea.style.overflow = 'hidden';
+                            msgArea.style.textOverflow = 'ellipsis';
+                            msgArea.style.paddingTop = '0px';
+                            msgArea.style.paddingBottom = '0px';
+                            window._isMessageExpanded = false;
+                        }
+                    }
+                }, true);
 
                 window._wasInInsertMode = false;
                 const observer = new MutationObserver(() => {
@@ -2175,41 +2206,53 @@
 
         function showStatusBarMessage(msg) {
             const msgArea = document.getElementById('neovim-message-area');
-            const msgTooltip = document.getElementById('neovim-message-tooltip');
-            if (msgArea && msgArea.style && msgTooltip && msgTooltip.style) {
+            if (msgArea) {
                 const lowerMsg = msg.toLowerCase();
                 const isError = lowerMsg.includes('error') || lowerMsg.includes('fail') || lowerMsg.includes('incorrect');
                 const isWarning = lowerMsg.includes('warning') || lowerMsg.includes('warn');
                 
                 if (isError) {
                     msgArea.style.color = '#ef4444'; // Tailwind Red 500
-                    msgTooltip.style.borderColor = '#ef4444';
                 } else if (isWarning) {
                     msgArea.style.color = '#f59e0b'; // Tailwind Amber 500
-                    msgTooltip.style.borderColor = '#f59e0b';
                 } else {
                     msgArea.style.color = '#e2e8f0'; // Tailwind Slate 200
-                    msgTooltip.style.borderColor = '#334155'; // Tailwind Slate 700
                 }
                 
                 msgArea.style.display = 'flex';
                 
+                const rawOutput = document.getElementById('vim-raw-output');
+                if (rawOutput) rawOutput.style.opacity = '0';
+                
                 const textSpan = msgArea.querySelector('.message-text');
                 if (textSpan) textSpan.textContent = msg;
-                msgTooltip.textContent = msg;
 
-                const isMultiline = msg.includes('\n');
+                const isMultiline = msg.includes('\n') || msg.length > 80;
                 if (isMultiline) {
-                    msgTooltip.style.display = 'block';
+                    msgArea.style.whiteSpace = 'pre-wrap';
+                    msgArea.style.overflow = 'visible';
+                    msgArea.style.textOverflow = 'clip';
+                    msgArea.style.paddingTop = '8px';
+                    msgArea.style.paddingBottom = '8px';
+                    window._isMessageExpanded = true;
+                } else {
+                    msgArea.style.whiteSpace = 'nowrap';
+                    msgArea.style.overflow = 'hidden';
+                    msgArea.style.textOverflow = 'ellipsis';
+                    msgArea.style.paddingTop = '0px';
+                    msgArea.style.paddingBottom = '0px';
+                    window._isMessageExpanded = false;
                 }
                 
                 // Automatically hide the message area after 8 seconds
                 if (window._vimMsgTimeout) clearTimeout(window._vimMsgTimeout);
                 window._vimMsgTimeout = setTimeout(() => {
                     msgArea.style.display = 'none';
-                    if (isMultiline) {
-                        msgTooltip.style.display = 'none';
-                    }
+                    msgArea.style.paddingTop = '0px';
+                    msgArea.style.paddingBottom = '0px';
+                    window._isMessageExpanded = false;
+                    const rawOutput = document.getElementById('vim-raw-output');
+                    if (rawOutput) rawOutput.style.opacity = '1';
                 }, 8000);
             } else {
                 console.log("[Vim Message]", msg);
@@ -3363,6 +3406,30 @@
                                 });
                                 Vim.mapCommand('[d', 'action', 'goToPrevDiagnostic', {}, { context: 'normal' });
                                 Vim.mapCommand(']d', 'action', 'goToNextDiagnostic', {}, { context: 'normal' });
+
+                                Vim.defineAction('toggleMessagePanel', (cm) => {
+                                    const msgArea = document.getElementById('neovim-message-area');
+                                    const rawOutput = document.getElementById('vim-raw-output');
+                                    if (msgArea && msgArea.style.display !== 'none') {
+                                        const isExpanded = msgArea.style.whiteSpace === 'pre-wrap';
+                                        if (isExpanded) {
+                                            msgArea.style.whiteSpace = 'nowrap';
+                                            msgArea.style.overflow = 'hidden';
+                                            msgArea.style.textOverflow = 'ellipsis';
+                                            msgArea.style.paddingTop = '0px';
+                                            msgArea.style.paddingBottom = '0px';
+                                            window._isMessageExpanded = false;
+                                        } else {
+                                            msgArea.style.whiteSpace = 'pre-wrap';
+                                            msgArea.style.overflow = 'visible';
+                                            msgArea.style.textOverflow = 'clip';
+                                            msgArea.style.paddingTop = '8px';
+                                            msgArea.style.paddingBottom = '8px';
+                                            window._isMessageExpanded = true;
+                                        }
+                                    }
+                                });
+                                Vim.mapCommand('gm', 'action', 'toggleMessagePanel', {}, { context: 'normal' });
 
                                  // Override character find/till motions to prevent inclusive offset single-char deletion on search failure
                                  Vim.defineMotion('moveToCharacter', function(cm, head, motionArgs) {
